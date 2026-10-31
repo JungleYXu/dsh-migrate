@@ -33,5 +33,13 @@
   "os": [
     "win32"
   ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/JungleYXu/dsh-migrate.git"
+  },
+  "homepage": "https://github.com/JungleYXu/dsh-migrate#readme",
+  "bugs": {
+    "url": "https://github.com/JungleYXu/dsh-migrate/issues"
+  },
   "private": false
 }
