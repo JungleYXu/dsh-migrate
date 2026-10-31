@@ -24,7 +24,7 @@ import zlib from 'node:zlib';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 
-const VERSION = '1.0.0';
+const VERSION = '1.1.0';
 const FORMAT = 'dsh-migrate/1';
 const ZSTD_MAGIC = 0xfd2fb528;
 const CHECKSUM = { params: { [zlib.constants.ZSTD_c_checksumFlag]: 1 } };
@@ -188,6 +188,17 @@ const EN_RULES = [
   [/^ 删除失败 (.+)：(.+)$/, ' Could not delete $1: $2'],
   [/^ 删除中转站文件失败 (.+)：(.+)$/, ' Could not remove $1 from the relay: $2'],
   [/^ 冲突文件已保留本地版本，另一份另存为 \.conflict-<时间戳>$/, ' Conflicting files kept their local version; the other copy was saved as .conflict-<timestamp>'],
+  [/^  已备份 (\d+) 项到 (.+)$/, '  Backed up $1 item(s) to $2'],
+  [/^  备份失败 (.+)：(.+)$/, ' Backup failed for $1: $2'],
+  [/^没有找到备份：(.+)$/, 'No backups found: $1'],
+  [/^备份（(\d+) 次，最新在前）：(.+)$/, 'Backups ($1 run(s), newest first): $2'],
+  [/^  (\d{8}-\d{6})  (.+)  (\d+) 项$/, '  $1  $2  $3 item(s)'],
+  [/^没有这次备份：(.+)$/, 'No such backup: $1'],
+  [/^回滚 (.+)（(\d+) 项）$/, 'Rolling back $1 ($2 item(s))'],
+  [/^  （--dry-run，没有写任何文件）$/, '  (--dry-run, nothing was written)'],
+  [/^已恢复 (\d+) 项，跳过 (\d+) 项$/, 'Restored $1 item(s), skipped $2'],
+  [/^已恢复 (\d+) 项$/, 'Restored $1 item(s)'],
+  [/^  回滚之后建议再跑一次 sync，让两台机器重新对齐。$/, '  Run sync once more so both machines line up again.'],
   [/^  冲突会话已按「最后写入时间新的赢」收敛，旧的一份另存为 \.conflict-<时间戳>$/, '  Conflicting sessions were resolved by last-write-wins; the older copy was saved as .conflict-<timestamp>'],
   [/^  两台机器现在内容一致，可以直接换机继续。$/, '  Both machines now hold the same content — you can switch machines.'],
   [/^ (.+) 两边都改过，采用本机那份（另一份另存 \.conflict-<时间戳>）$/, ' $1 was modified on both sides — keeping the local copy (the other saved as .conflict-<timestamp>)'],
@@ -984,7 +995,7 @@ function cmdRestore(opts) {
  * 不需要等工具加名单。
  */
 const MANAGED_DIRS = new Set(['sessions', 'storages', 'profiles']);
-const NEVER_SYNC_DIRS = new Set(['node_modules', 'dsh-runtimes', 'cache', 'logs', '.git']);
+const NEVER_SYNC_DIRS = new Set(['node_modules', 'dsh-runtimes', 'cache', 'logs', '.git', '.dsh-migrate-backup']);
 const NEVER_SYNC_FILES = new Set(['.credentials.yaml', 'manifest.json', '.dsh-migrate-state.json', '.DS_Store', 'Thumbs.db']);
 const VOLATILE_RE = /(^|[\\/])(\.migrate-tmp|.*\.lock|~.*\.tmp)$/;
 
@@ -1208,7 +1219,10 @@ function mergeTree(localRoot, bundleRoot, opts) {
       stats.pushed++;
     };
     const toLocal = () => {
-      if (!dry) copyFilePreserve(path.join(bundleRoot, rel), path.join(localRoot, rel));
+      if (!dry) {
+        backupSave(opts.scope, localRoot, rel);
+        copyFilePreserve(path.join(bundleRoot, rel), path.join(localRoot, rel));
+      }
       stats.pulled++;
     };
     if (!la) toLocal();
@@ -1251,7 +1265,10 @@ function mergeTree(localRoot, bundleRoot, opts) {
           const keep = path.join(path.dirname(localFile), `${path.basename(localFile)}.conflict-${stamp()}`);
           copyFilePreserve(localWins ? bundleFile : localFile, keep);
           if (localWins) copyFilePreserve(localFile, bundleFile);
-          else copyFilePreserve(bundleFile, localFile);
+          else {
+            backupSave(opts.scope, localRoot, rel);
+            copyFilePreserve(bundleFile, localFile);
+          }
           // 两边都标成「刚刚」：内容已一致、时间也一致，下次同步直接就跳过这一段，
           // 另一台机器拉过去之后同样会跳过，不会来回重复报同一个冲突。
           const now = new Date();
@@ -1421,7 +1438,11 @@ function mergeSessionIds(localJson, bundleJson, mapping) {
  * localCwd / bundleCwd 为空表示这个目录不属于已登记的工作区（会话是在别的文件夹里开的），
  * 原样搬运、不改 header 里的 cwd。
  */
-function mergeSessionDirs(lDir, bDir, localCwd, bundleCwd, stats, dry) {
+function mergeSessionDirs(lDir, bDir, localCwd, bundleCwd, stats, dry, home) {
+  const keepOld = (d) => {
+    if (dry || !home) return;
+    backupSave('home', home, path.relative(home, d));
+  };
   const list = (root) => {
     try {
       return fs.readdirSync(root, { withFileTypes: true }).filter((e) => e.isDirectory()).map((e) => e.name);
@@ -1443,6 +1464,7 @@ function mergeSessionDirs(lDir, bDir, localCwd, bundleCwd, stats, dry) {
       continue;
     }
     if (bf && !lf) {
+      keepOld(ld);
       copySessionDir(bd, ld, localCwd, dry);
       pulled++;
       continue;
@@ -1457,6 +1479,7 @@ function mergeSessionDirs(lDir, bDir, localCwd, bundleCwd, stats, dry) {
       copySessionDir(ld, bd, bundleCwd, dry);
       pushed++;
     } else if (bSuperset && B.tail.length > L.tail.length) {
+      keepOld(ld);
       copySessionDir(bd, ld, localCwd, dry);
       pulled++;
     } else {
@@ -1479,7 +1502,10 @@ function mergeSessionDirs(lDir, bDir, localCwd, bundleCwd, stats, dry) {
         const keep = path.join(ld, `${path.basename(localWins ? bf : lf)}.conflict-${stamp()}`);
         fs.copyFileSync(localWins ? bf : lf, keep);
         if (localWins) copySessionDir(ld, bd, bundleCwd, false);
-        else copySessionDir(bd, ld, localCwd, false);
+        else {
+          keepOld(ld);
+          copySessionDir(bd, ld, localCwd, false);
+        }
       }
     }
   }
@@ -1515,7 +1541,7 @@ function mergeSessions(home, dir, mapping, stats, dry) {
   let pulled = 0;
   let pushed = 0;
   for (const [bKey, info] of pairs) {
-    const r = mergeSessionDirs(path.join(lRoot, info.lKey), path.join(bRoot, bKey), info.cwdA, info.cwdB, stats, dry);
+    const r = mergeSessionDirs(path.join(lRoot, info.lKey), path.join(bRoot, bKey), info.cwdA, info.cwdB, stats, dry, home);
     pulled += r.pulled;
     pushed += r.pushed;
     if (r.pulled || r.pushed) log(`  会话（${info.label}）：拉入 ${r.pulled} / 推出 ${r.pushed}`);
@@ -1555,6 +1581,7 @@ function mergeStorages(home, dir, mapping, dry) {
     fs.mkdirSync(path.dirname(to), { recursive: true });
     fs.writeFileSync(to, text);
   };
+  const keepOld = (rel) => backupSave('home', home, path.join('storages', rel));
 
   const filesA = walkRel(a, skip);
   const filesB = walkRel(b, skip);
@@ -1565,6 +1592,7 @@ function mergeStorages(home, dir, mapping, dry) {
     const sb = filesB.get(rel);
     if (!sa) {
       if (dry) continue;
+      keepOld(rel);
       if (isText(pb)) moveText(pb, pa, (r) => r.bundle, (r) => r.local);
       else copyFilePreserve(pb, pa);
       continue;
@@ -1581,6 +1609,7 @@ function mergeStorages(home, dir, mapping, dry) {
       if (isText(pa)) moveText(pa, pb, (r) => r.local, (r) => r.bundle);
       else copyFilePreserve(pa, pb);
     } else {
+      keepOld(rel);
       if (isText(pb)) moveText(pb, pa, (r) => r.bundle, (r) => r.local);
       else copyFilePreserve(pb, pa);
     }
@@ -1702,6 +1731,7 @@ function mergeProfiles(home, dir, mapping, dry, stats) {
   }
   if (!isDir(a) || !isDir(b)) return false;
   const translate = translateLink;
+  const keepOld = (abs) => backupSave('profiles', a, path.relative(a, abs));
   let localChanged = false;
   const names = new Set([
     ...fs.readdirSync(a, { withFileTypes: true }).filter((e) => e.isDirectory()).map((e) => e.name),
@@ -1736,6 +1766,7 @@ function mergeProfiles(home, dir, mapping, dry, stats) {
         }
       }
       if (!dry && changedLocal) {
+        keepOld(pa);
         fs.writeFileSync(pa, JSON.stringify(ja, null, 2) + '\n');
         localChanged = true;
       }
@@ -1774,7 +1805,10 @@ function mergeProfiles(home, dir, mapping, dry, stats) {
           const keep = path.join(path.dirname(x), `${f}.conflict-${stamp()}`);
           copyFilePreserve(localWins ? y : x, keep);
           if (localWins) copyFilePreserve(x, y);
-          else copyFilePreserve(y, x);
+          else {
+            keepOld(x);
+            copyFilePreserve(y, x);
+          }
           warn(`  ${name}/${f} 两边都改过，采用${localWins ? '本机' : '中转站'}那份（另一份另存 .conflict-<时间戳>）`);
           const now = new Date();
           fs.utimesSync(x, now, now);
@@ -1783,7 +1817,10 @@ function mergeProfiles(home, dir, mapping, dry, stats) {
         }
         if (dry) continue;
         if (sx.mtimeMs > sy.mtimeMs) copyFilePreserve(x, y);
-        else copyFilePreserve(y, x);
+        else {
+          keepOld(x);
+          copyFilePreserve(y, x);
+        }
       } else if (sx && !sy && !dry) {
         fs.mkdirSync(path.dirname(y), { recursive: true });
         fs.copyFileSync(x, y);
@@ -1808,6 +1845,7 @@ function mergeProfiles(home, dir, mapping, dry, stats) {
       skip: skipOther,
       dry,
       stats: stats || scratch,
+      scope: `prof:${name}`,
       label: `${name}/插件私有文件`,
     });
   }
@@ -1822,6 +1860,10 @@ function mergeProfiles(home, dir, mapping, dry, stats) {
 // 「删完之后又在另一台改过」的文件不会被误删（按修改时间判断，新的赢）。
 
 const STATE_VERSION = 1;
+const BACKUP_VERSION = 1;
+const BACKUP_DIR_NAME = '.dsh-migrate-backup';
+const BACKUP_KEEP = 5;
+let BK = null; // 本次同步的写前镜像会话；null 表示不备份
 const TOMB_KEEP_MS = 30 * 24 * 3600 * 1000;
 const TOMB_MAX = 5000;
 
@@ -1951,6 +1993,7 @@ function applyTombstones(root, scope, state, dry, stats) {
       continue;
     }
     try {
+      backupSave(scope, root, t.path);
       fs.rmSync(abs, { force: true });
       pruneEmptyDirs(abs, root);
       stats.deletedPulled++;
@@ -1997,6 +2040,153 @@ function prevSnapshot(state, scope) {
 }
 
 /* ------------------------------------------------------------------- sync */
+
+/* ---- 写前镜像 ---------------------------------------------------------------
+ * 同步会改本机文件：从中转站覆盖、写冲突留档、按墓碑删除。这些动作一旦判断错了，
+ * 用户唯一的退路就是「另一台机器也还有一份」—— 但两台机器同时被写坏时就没有退路了。
+ * 所以每次改动之前，先把那份原始文件拷进 ~/.dsh/.dsh-migrate-backup/<时间戳>/。
+ * 只存被改到的文件（通常几 MB），保留最近 BACKUP_KEEP 次，`undo` 可以整份回滚。
+ */
+
+function backupRoot(home) {
+  return path.join(home, BACKUP_DIR_NAME);
+}
+
+function sanitizeScope(scope) {
+  return String(scope).replace(/[^A-Za-z0-9._-]+/g, '_').slice(0, 80) || 'root';
+}
+
+/** 开始一次同步的镜像目录；返回 null 表示这次不备份。 */
+function backupStart(home, opts) {
+  if (!home || opts.noBackup || opts.dry) return null;
+  // 同一秒内连跑两次时，目录名要能区分开，否则第二次会把第一次的镜像写进同一个目录，
+  // 前一次的 _manifest.json 被覆盖，那份备份就再也回滚不回来了。
+  const root = backupRoot(home);
+  const base = stamp();
+  let name = base;
+  for (let n = 2; fs.existsSync(path.join(root, name)); n++) name = `${base}-${n}`;
+  return { home, dir: path.join(root, name), scopes: new Map(), entries: [], saved: new Set() };
+}
+
+/** 改动 root/rel 之前把它存一份。同一路径一次同步只存最早的那份。 */
+function backupSave(scope, root, rel) {
+  const bk = BK;
+  if (!bk || !rel) return;
+  const key = `${scope}\u0000${rel}`;
+  if (bk.saved.has(key)) return;
+  const src = path.join(root, rel);
+  if (!exists(src)) return;
+  const dst = path.join(bk.dir, sanitizeScope(scope), rel);
+  try {
+    fs.mkdirSync(path.dirname(dst), { recursive: true });
+    if (isDir(src)) copyTree(src, dst);
+    else copyFilePreserve(src, dst);
+  } catch (e) {
+    warn(`  备份失败 ${rel}：${e.message}`);
+    return;
+  }
+  bk.saved.add(key);
+  if (!bk.scopes.has(scope)) bk.scopes.set(scope, root);
+  bk.entries.push({ scope, path: rel.split(path.sep).join('/'), kind: isDir(dst) ? 'dir' : 'file' });
+}
+
+function backupFinish(bk) {
+  if (!bk) return;
+  if (!bk.entries.length) {
+    // 什么都没改：不要留下空的备份目录，免得 undo 列表里全是噪音。
+    rmrf(bk.dir);
+    return;
+  }
+  const manifest = {
+    format: BACKUP_VERSION,
+    at: new Date().toISOString(),
+    home: bk.home,
+    scopes: [...bk.scopes].map(([id, root]) => ({ id, root })),
+    entries: bk.entries,
+  };
+  fs.mkdirSync(bk.dir, { recursive: true });
+  fs.writeFileSync(path.join(bk.dir, 'manifest.json'), JSON.stringify(manifest, null, 2), 'utf8');
+  log(`  已备份 ${bk.entries.length} 项到 ${bk.dir}`);
+}
+
+function listBackups(home) {
+  const root = backupRoot(home);
+  if (!isDir(root)) return [];
+  const out = [];
+  for (const name of fs.readdirSync(root).sort().reverse()) {
+    const dir = path.join(root, name);
+    const mf = path.join(dir, 'manifest.json');
+    if (!exists(mf)) continue;
+    try {
+      const m = JSON.parse(fs.readFileSync(mf, 'utf8').replace(/^\uFEFF/, ''));
+      out.push({ stamp: name, dir, manifest: m });
+    } catch {
+      /* 损坏的备份目录跳过，不影响其它几次 */
+    }
+  }
+  return out;
+}
+
+/** 只保留最近 BACKUP_KEEP 次；更早的连同目录一起删掉。 */
+function pruneBackups(home) {
+  const all = listBackups(home);
+  for (const b of all.slice(BACKUP_KEEP)) rmrf(b.dir);
+}
+
+function cmdUndo(opts) {
+  const home = path.resolve(opts.home || defaultHome());
+  const runs = listBackups(home);
+  if (!runs.length) {
+    warn(`没有找到备份：${backupRoot(home)}`);
+    process.exit(1);
+  }
+  if (opts.list) {
+    log(`备份（${runs.length} 次，最新在前）：${backupRoot(home)}`);
+    for (const b of runs) {
+      const when = b.manifest.at ? new Date(b.manifest.at).toLocaleString() : b.stamp;
+      log(`  ${b.stamp}  ${when}  ${b.manifest.entries.length} 项`);
+    }
+    return;
+  }
+  const run = opts.at ? runs.find((b) => b.stamp === String(opts.at)) : runs[0];
+  if (!run) {
+    warn(`没有这次备份：${opts.at}`);
+    process.exit(1);
+  }
+  const roots = new Map((run.manifest.scopes || []).map((s) => [s.id, s.root]));
+  log(`回滚 ${run.stamp}（${run.manifest.entries.length} 项）`);
+  let done = 0;
+  let skipped = 0;
+  for (const e of run.manifest.entries) {
+    const scopeRoot = roots.get(e.scope);
+    if (!scopeRoot) {
+      skipped++;
+      continue;
+    }
+    const from = path.join(run.dir, sanitizeScope(e.scope), e.path);
+    const to = path.join(scopeRoot, e.path);
+    if (!exists(from)) {
+      skipped++;
+      continue;
+    }
+    log(`  ${e.scope}/${e.path}`);
+    if (opts.dry) continue;
+    fs.mkdirSync(path.dirname(to), { recursive: true });
+    if (isDir(from)) {
+      rmrf(to);
+      copyTree(from, to);
+    } else {
+      copyFilePreserve(from, to);
+    }
+    done++;
+  }
+  if (opts.dry) {
+    log(`  （--dry-run，没有写任何文件）`);
+    return;
+  }
+  log(`已恢复 ${done} 项${skipped ? `，跳过 ${skipped} 项` : ''}`);
+  log(`  回滚之后建议再跑一次 sync，让两台机器重新对齐。`);
+}
 
 function cmdSync(opts) {
   const dir = path.resolve(opts.with || opts.in);
@@ -2073,6 +2263,7 @@ function cmdSync(opts) {
   const lstate = loadLocalState(home); // 本机：上次快照（各自一份）
   const bundleHome = path.join(dir, 'home');
   const homeSkip = scopeSkip(withGit, false);
+  BK = backupStart(home, opts);
 
   /* 0) 删除传播：先处理墓碑，再找出「上次有、这次没了」的文件。
         必须放在合并之前 —— 合并会把中转站那份重新拉回来，之后就分不清是删除还是缺失。 */
@@ -2101,6 +2292,7 @@ function cmdSync(opts) {
       skip,
       dry,
       stats,
+      scope,
       label: path.basename(m.localPath),
     });
     if (!dry) recordSnapshot(m.localPath, scope, lstate, skip);
@@ -2119,6 +2311,7 @@ function cmdSync(opts) {
   if (localJson && bundleJson) {
     mergeSessionIds(localJson, bundleJson, mapping);
     if (!dry) {
+      backupSave('home', home, path.relative(home, idx.file));
       const wroteLocal = writeIndex(idx.file, localJson);
       const wroteBundle = writeIndex(path.join(dir, 'home', 'storages', 'workspace.json'), bundleJson);
       if (wroteLocal || wroteBundle) log('  两边的 workspace.json 已合并（工作区 id、会话列表取并集）');
@@ -2147,7 +2340,7 @@ function cmdSync(opts) {
     fs.mkdirSync(la, { recursive: true });
     fs.mkdirSync(lb, { recursive: true });
     const before = { ...stats };
-    mergeTree(la, lb, { dry, stats, label: name, contentAddressed: name === 'attachments' });
+    mergeTree(la, lb, { dry, stats, scope, label: name, contentAddressed: name === 'attachments' });
     if (!dry) recordSnapshot(la, scope, lstate, homeSkip);
     const dP = stats.pulled - before.pulled;
     const dQ = stats.pushed - before.pushed;
@@ -2174,7 +2367,10 @@ function cmdSync(opts) {
         const keep = path.join(home, `${f}.conflict-${stamp()}`);
         copyFilePreserve(localWins ? y : x, keep);
         if (localWins) copyFilePreserve(x, y);
-        else copyFilePreserve(y, x);
+        else {
+          backupSave('home', home, f);
+          copyFilePreserve(y, x);
+        }
         warn(`  ${f} 两边都改过，采用${localWins ? '本机' : '中转站'}那份（另一份另存 .conflict-<时间戳>）`);
         stats.fileConflicts++;
         const now = new Date();
@@ -2187,6 +2383,7 @@ function cmdSync(opts) {
         copyFilePreserve(x, y);
         stats.pushed++;
       } else {
+        backupSave('home', home, f);
         copyFilePreserve(y, x);
         stats.pulled++;
       }
@@ -2217,7 +2414,7 @@ function cmdSync(opts) {
       fs.mkdirSync(abs, { recursive: true });
       fs.mkdirSync(bu, { recursive: true });
       const before = { ...stats };
-      mergeTree(abs, bu, { dry, stats, label });
+      mergeTree(abs, bu, { dry, stats, scope, label });
       if (!dry) recordSnapshot(abs, scope, lstate, homeSkip);
       const dP = stats.pulled - before.pulled;
       const dQ = stats.pushed - before.pushed;
@@ -2265,6 +2462,10 @@ function cmdSync(opts) {
       warn('有新增插件但没找到 dsh 命令，请手动执行：dsh plugin --profile desktop install');
     }
   }
+
+  backupFinish(BK);
+  BK = null;
+  if (!dry) pruneBackups(home);
 
   step(dry ? '完成（--dry-run，未写入任何东西）' : '完成');
   log(`  中转站：${dir}`);
@@ -2316,15 +2517,17 @@ const HELP_ZH = `dsh-migrate ${VERSION} — 在两台电脑之间接力使用 De
     两台机器轮流各双击一次，内容就接上了，谁都不用重新装、不用重新登录。
 
   命令行
-  node dsh-migrate.mjs sync    --with <中转目录> [--home <DSH_HOME>] [--with-plugin-data [目录名,...]] [--no-install] [--no-delete] [--dry-run]
+  node dsh-migrate.mjs sync    --with <中转目录> [--home <DSH_HOME>] [--with-plugin-data [目录名,...]] [--no-install] [--no-delete] [--no-backup] [--dry-run]
   node dsh-migrate.mjs pack    --out <目录>   [--home <DSH_HOME>] [--with-credentials] [--with-git] [--with-plugin-data [目录名,...]] [--force]
   node dsh-migrate.mjs restore --in  <目录>   [--home <DSH_HOME>] [--workspace-root <目录>] [--no-install] [--force] [--dry-run]
+  node dsh-migrate.mjs undo                   [--home <DSH_HOME>] [--list] [--at <时间戳>] [--dry-run]
   node dsh-migrate.mjs status                 [--home <DSH_HOME>]
   node dsh-migrate.mjs --version | --help
 
   选项
   --lang zh|en        输出语言（默认跟随系统区域；也可用 DSH_MIGRATE_LANG 指定）
   --no-delete         sync 只合并、不传播删除（默认会把「本机删掉的文件」同步删掉对面那份）
+  --no-backup         sync 不做写前备份（默认会把即将被改动的本机文件先存一份）
 
 说明：
   * 运行前请**完全退出** DeepSeek Harness（关窗口不算，从托盘退出）。
@@ -2336,6 +2539,9 @@ const HELP_ZH = `dsh-migrate ${VERSION} — 在两台电脑之间接力使用 De
     否则对面一同步又会被推回来、删了等于没删。只有「本机这份比删除时间还新」时才留下（删完又改过）。
     DSH 自己会重建的路径（workspace.json、profile 的 package.json / cordis*.yml / 锁文件）不参与删除传播；
     不想要这个行为就加 --no-delete。
+  * 每次 sync 之前，即将被覆盖或删除的本机文件会先存一份到 ~\\.dsh\\.dsh-migrate-backup\\<时间戳>\\（通常只有几 MB，
+    保留最近 5 次）。发现数据不对就运行 undo 回滚最近一次，或 undo --list 挑一次回滚。
+    同步没改动任何文件时不会留下备份目录；不需要这个兜底就加 --no-backup。
   * 同步范围是「发现式」的：DSH home 下的会话、存储、插件清单，加上工作区目录里的全部文件，
     以及 DSH home 里其它顶层目录（插件自己建的数据目录，装了什么插件就带什么，不需要预先知道）。
     始终跳过 node_modules、dsh-runtimes、cache、logs；.credentials.yaml 不搬（每台机器各自登录一次）。
@@ -2355,15 +2561,17 @@ const HELP_EN = `dsh-migrate ${VERSION} — move DeepSeek Harness between two co
     Alternate one double-click per machine and the two stay in step — no reinstall, no re-login.
 
   Command line
-  node dsh-migrate.mjs sync    --with <relay-dir> [--home <DSH_HOME>] [--with-plugin-data [dir,...]] [--no-install] [--no-delete] [--dry-run]
+  node dsh-migrate.mjs sync    --with <relay-dir> [--home <DSH_HOME>] [--with-plugin-data [dir,...]] [--no-install] [--no-delete] [--no-backup] [--dry-run]
   node dsh-migrate.mjs pack    --out <dir>        [--home <DSH_HOME>] [--with-credentials] [--with-git] [--with-plugin-data [dir,...]] [--force]
   node dsh-migrate.mjs restore --in <dir>         [--home <DSH_HOME>] [--workspace-root <dir>] [--no-install] [--force] [--dry-run]
+  node dsh-migrate.mjs undo                       [--home <DSH_HOME>] [--list] [--at <stamp>] [--dry-run]
   node dsh-migrate.mjs status                     [--home <DSH_HOME>]
   node dsh-migrate.mjs --version | --help
 
   Options
   --lang zh|en        Output language (defaults to the system locale; DSH_MIGRATE_LANG also works)
   --no-delete         sync merges only; do not propagate deletions to the other machine
+  --no-backup         sync without the pre-write backup (on by default)
 
 Notes:
   * Quit DeepSeek Harness **completely** before running (closing the window is not enough; exit from
@@ -2377,6 +2585,10 @@ Notes:
     A copy that is *newer* than the deletion survives (you edited it after deleting); DSH-owned paths
     (workspace.json, profile package.json / cordis*.yml / lock files) are never deleted this way.
     Pass --no-delete to disable the whole feature.
+  * Before every sync, each local file that is about to be overwritten or deleted is copied to
+    ~\\.dsh\\.dsh-migrate-backup\\<stamp>\\ (usually a few MB; the last 5 runs are kept). If the result
+    looks wrong, run undo to roll the last run back, or undo --list to pick an older one.
+    A sync that changed nothing leaves no backup directory; pass --no-backup to turn this off.
   * The sync scope is discovered, not hard-coded: every session, storage file and plugin manifest under
     the DSH home, every file in the workspace, plus any other top-level directory in the DSH home
     (a plugin's own data directory travels with the plugin, without this tool knowing about it).
@@ -2443,6 +2655,7 @@ if (!cmd && (argv.help || argv.h)) {
 if (cmd === 'pack') cmdPack(argv);
 else if (cmd === 'restore') cmdRestore(argv);
 else if (cmd === 'sync') cmdSync(argv);
+else if (cmd === 'undo') cmdUndo(argv);
 else if (cmd === 'status') cmdStatus(argv);
 else {
   log(helpText());

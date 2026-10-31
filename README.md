@@ -46,9 +46,10 @@ Do not run it while DSH is open. The tool detects a locked data directory and re
 ## Command line
 
 ```text
-node dsh-migrate.mjs sync    --with <relay-dir> [--home <DSH_HOME>] [--with-plugin-data [dir,...]] [--no-install] [--no-delete] [--dry-run]
+node dsh-migrate.mjs sync    --with <relay-dir> [--home <DSH_HOME>] [--with-plugin-data [dir,...]] [--no-install] [--no-delete] [--no-backup] [--dry-run]
 node dsh-migrate.mjs pack    --out <dir>        [--home <DSH_HOME>] [--with-credentials] [--with-git] [--with-plugin-data [dir,...]] [--force]
 node dsh-migrate.mjs restore --in <dir>         [--home <DSH_HOME>] [--workspace-root <dir>] [--no-install] [--force] [--dry-run]
+node dsh-migrate.mjs undo                       [--home <DSH_HOME>] [--list] [--at <stamp>] [--dry-run]
 node dsh-migrate.mjs status                     [--home <DSH_HOME>]
 node dsh-migrate.mjs --version | --help
 ```
@@ -65,6 +66,7 @@ Every command also accepts `--lang zh|en`.
 | `--with-credentials` | Include `.credentials.yaml` (off by default — see below). |
 | `--no-install` | Skip `dsh plugin install` (dry runs, CI, or when you want to install by hand). |
 | `--no-delete` | Do not propagate deletions; keep the merge union-only. |
+| `--no-backup` | Skip the pre-write backup for this run (on by default, see below). |
 | `--dry-run` | Print what would change, write nothing. Start here. |
 | `--force` | Run even if DSH appears to be running; also allows overwriting an existing bundle. |
 
@@ -110,6 +112,29 @@ A pure union would resurrect anything you delete on one machine — the other ma
 - Tombstones live in the relay (`state.json`, kept 30 days). Each machine's "last snapshot" lives in `~/.dsh/.dsh-migrate-state.json` and is never synced — if it were shared, a machine would mistake files it has not pulled yet for deletions.
 
 Pass `--no-delete` to keep the old behaviour: merge only, deleted files come back on the next sync.
+
+## Undo: every sync keeps what it replaces
+
+A merge decides which copy wins. If it decides wrong — or if a plugin writes something odd and the tool copies it over — you want the previous file back, not a discussion about conflict semantics. So before `sync` overwrites or deletes anything on this machine, it copies that file to:
+
+```text
+~/.dsh/.dsh-migrate-backup/<YYYYMMDD-HHMMSS>/<scope>/<relative path>
+```
+
+Only the files actually about to change are copied, so a typical run is a few hundred KB to a few MB, not another 50 MB. The last **5** runs are kept; older ones are pruned.
+
+```text
+node dsh-migrate.mjs undo --list                  # what is available
+node dsh-migrate.mjs undo                         # roll back the most recent sync
+node dsh-migrate.mjs undo --at 20261031-204101    # roll back a specific run
+node dsh-migrate.mjs undo --dry-run               # show what would be restored
+```
+
+`undo` restores the backed-up files to where they came from (the backup manifest records each scope's root, so it works even if you moved the workspace). After an undo, run `sync` once more so both machines line up again — the relay still holds the version you just rolled back.
+
+A sync that changed nothing leaves no backup directory at all. Pass `--no-backup` if you keep your own snapshots and do not want this.
+
+`restore` behaves differently and has since 1.0: it renames the whole existing DSH home to `<home>.bak-<stamp>` before writing, then moves your machine-bound pieces (`dsh-runtimes`, `cache`, `logs`, `.credentials.yaml`) back into place. That is the bigger hammer, and it stays.
 
 ## How it works
 

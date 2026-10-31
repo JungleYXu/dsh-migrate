@@ -187,7 +187,7 @@ try {
   console.log(`temp dir: ${root}`);
 
   console.log('\n[1] --version / --help');
-  check(run('--version').stdout.includes('1.0.0'), 'reports a version');
+  check(run('--version').stdout.includes('1.1.0'), 'reports a version');
   check(run('--help').status === 0, '--help exits 0');
 
   console.log('\n[2] pack');
@@ -327,6 +327,36 @@ try {
   check(r.status === 0, '--no-delete exits 0', r.stderr);
   check(exists(B.home, 'resurrect.txt'), '--no-delete restores the file instead of deleting it elsewhere');
   check(exists(relay, 'home', 'resurrect.txt'), '--no-delete leaves the relay untouched');
+
+  console.log('\n[12] pre-write backup and undo');
+  const backupDir = path.join(B.home, '.dsh-migrate-backup');
+  fs.rmSync(backupDir, { recursive: true, force: true }); // earlier sections made backups of their own
+  const mine = path.join(B.home, 'backup-test.txt');
+  fs.writeFileSync(mine, 'original\n');
+  syncB();
+  syncA();
+  const relayCopy = path.join(relay, 'home', 'backup-test.txt');
+  check(exists(relay, 'home', 'backup-test.txt'), 'file reached the relay before the test');
+  fs.writeFileSync(relayCopy, 'relay version\n');
+  const future = new Date(Date.now() + 60000);
+  fs.utimesSync(relayCopy, future, future);
+  const runs = () => (fs.existsSync(backupDir) ? fs.readdirSync(backupDir).filter((d) => /^\d{8}-\d{6}(-\d+)?$/.test(d)) : []);
+  const beforeRun = runs().length;
+  r = syncB();
+  check(fs.readFileSync(mine, 'utf8') === 'relay version\n', 'newer relay copy overwrote the local file');
+  check(runs().length === beforeRun + 1, 'the overwritten file was backed up first', `runs=${runs().length} before=${beforeRun}`);
+  check(/已备份 \d+ 项|Backed up \d+ item/.test(r.stdout), 'sync reports the backup', r.stdout.match(/.*备份.*/)?.[0]);
+  r = run('undo', '--home', B.home, '--force');
+  check(r.status === 0, 'undo exits 0', r.stderr);
+  check(fs.readFileSync(mine, 'utf8') === 'original\n', 'undo restored the previous content', fs.readFileSync(mine, 'utf8'));
+
+  const beforeNoBackup = runs().length;
+  fs.writeFileSync(relayCopy, 'relay version 2\n');
+  const later = new Date(Date.now() + 120000);
+  fs.utimesSync(relayCopy, later, later);
+  r = run('sync', '--with', relay, '--home', B.home, '--workspace-root', path.dirname(B.ws), '--no-install', '--force', '--no-backup');
+  check(r.status === 0, '--no-backup exits 0', r.stderr);
+  check(runs().length === beforeNoBackup, '--no-backup leaves no new backup run', `runs=${runs().length}`);
 } finally {
   fs.rmSync(root, { recursive: true, force: true });
 }

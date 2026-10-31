@@ -46,9 +46,10 @@ DeepSeek Harness 把所有东西都放在本机：`~/.dsh` 里是会话日志、
 ## 命令行
 
 ```text
-node dsh-migrate.mjs sync    --with <中转目录> [--home <DSH_HOME>] [--with-plugin-data [目录名,...]] [--no-install] [--no-delete] [--dry-run]
+node dsh-migrate.mjs sync    --with <中转目录> [--home <DSH_HOME>] [--with-plugin-data [目录名,...]] [--no-install] [--no-delete] [--no-backup] [--dry-run]
 node dsh-migrate.mjs pack    --out <目录>      [--home <DSH_HOME>] [--with-credentials] [--with-git] [--with-plugin-data [目录名,...]] [--force]
 node dsh-migrate.mjs restore --in <目录>       [--home <DSH_HOME>] [--workspace-root <目录>] [--no-install] [--force] [--dry-run]
+node dsh-migrate.mjs undo                      [--home <DSH_HOME>] [--list] [--at <时间戳>] [--dry-run]
 node dsh-migrate.mjs status                    [--home <DSH_HOME>]
 node dsh-migrate.mjs --version | --help
 ```
@@ -65,6 +66,7 @@ node dsh-migrate.mjs --version | --help
 | `--with-credentials` | 连 `.credentials.yaml` 一起搬（默认不搬——见下）。 |
 | `--no-install` | 跳过 `dsh plugin install`（只想看改动、或准备手工装）。 |
 | `--no-delete` | 不传播删除：只做并集合并，本机删掉的文件不会让对面也删。 |
+| `--no-backup` | 本次同步不做写前备份（默认会做，见下一节）。 |
 | `--dry-run` | 只打印会做什么，不写任何东西。**建议第一次先跑这个。** |
 | `--force` | 应用还在运行时也照跑；也用于覆盖已有的中转站。 |
 
@@ -108,6 +110,29 @@ node dsh-migrate.mjs --version | --help
 - 墓碑在中转站的 `state.json` 里，保留 30 天；本机「上次快照」存在 `~/.dsh/.dsh-migrate-state.json`（只在本机，不同步——否则另一台会把自己没拉过的新文件当成删除）。
 
 不想要这个行为，加 `--no-delete`：只合并不删，删掉的东西下次同步会回来。
+
+## 回滚：每次同步都留一份被改掉的文件
+
+合并要判断「哪一份更新」，判断错了、或者插件写的东西被覆盖了，你想要的不是一场关于冲突语义的讨论，而是把上一份文件拿回来。所以每次 `sync` 在覆盖或删除本机任何文件之前，都会先把它复制到：
+
+```text
+~/.dsh/.dsh-migrate-backup/<YYYYMMDD-HHMMSS>/<scope>/<相对路径>
+```
+
+只复制「即将被改动」的那几个文件，一次通常几百 KB 到几 MB，不是又存 50 MB。保留最近 **5** 次，更早的自动清掉。
+
+```text
+node dsh-migrate.mjs undo --list                  # 有哪些备份
+node dsh-migrate.mjs undo                         # 回滚最近一次同步
+node dsh-migrate.mjs undo --at 20261031-204101    # 回滚指定的那一次
+node dsh-migrate.mjs undo --dry-run               # 只列出会恢复哪些文件
+```
+
+`undo` 会按备份清单里记录的各 scope 根目录把文件放回原处（所以就算你后来把工作区挪了位置也能对上）。回滚之后建议再跑一次 `sync`，让两台机器重新对齐——中转站里还留着刚被你回滚掉的那个版本。
+
+一次没有改动任何文件的同步不会留下备份目录。如果你自己有快照机制，加 `--no-backup` 关掉它。
+
+`restore` 是另一套、从 1.0 就有的机制：它先把整个现有 DSH home 改名成 `<home>.bak-<时间戳>` 再写入，然后把本机专属的 `dsh-runtimes`、`cache`、`logs`、`.credentials.yaml` 搬回去。那是更大的锤子，保留不动。
 
 ## 它是怎么做到的
 

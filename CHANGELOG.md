@@ -4,10 +4,17 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project follows
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [1.1.0] — 2026-10-31
+
+Deletions now travel between machines, and every message speaks your language.
 
 ### Added
 
+- Pre-write backup plus `undo`: before `sync` overwrites or deletes anything on this machine,
+  the file is copied to `~/.dsh/.dsh-migrate-backup/<stamp>/` (only what is about to change, the
+  last 5 runs are kept). `undo`, `undo --list`, `undo --at <stamp>` and `undo --dry-run` put it
+  back; a run that changed nothing leaves no backup. `--no-backup` turns it off. `restore` keeps
+  its own whole-home `<home>.bak-<stamp>` rename.
 - Deletion propagation: a file deleted on one machine is deleted on the other at its next
   sync (relay copy included), tracked by tombstones in the relay's `state.json`. A copy
   newer than the tombstone survives ("resurrection") and is pushed back; DSH-owned paths
