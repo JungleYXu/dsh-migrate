@@ -8,6 +8,13 @@ All notable changes to this project are documented here. The format is based on
 
 ### Added
 
+- Deletion propagation: a file deleted on one machine is deleted on the other at its next
+  sync (relay copy included), tracked by tombstones in the relay's `state.json`. A copy
+  newer than the tombstone survives ("resurrection") and is pushed back; DSH-owned paths
+  (`storages/workspace.json`, profile `package.json` / `cordis*.yml` / lock files) are
+  never deleted this way. Each machine keeps its own last-snapshot file
+  (`~/.dsh/.dsh-migrate-state.json`, never synced) so it cannot mistake files it has not
+  pulled yet for deletions. Opt out with `--no-delete`.
 - Bilingual output: `--help`, `--version` and every progress/error message render in
   Chinese or English. `--lang zh|en` overrides, `DSH_MIGRATE_LANG` does the same, and
   the default follows the system locale. Paths, session titles and user file names are

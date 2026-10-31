@@ -46,7 +46,7 @@ Do not run it while DSH is open. The tool detects a locked data directory and re
 ## Command line
 
 ```text
-node dsh-migrate.mjs sync    --with <relay-dir> [--home <DSH_HOME>] [--with-plugin-data [dir,...]] [--no-install] [--dry-run]
+node dsh-migrate.mjs sync    --with <relay-dir> [--home <DSH_HOME>] [--with-plugin-data [dir,...]] [--no-install] [--no-delete] [--dry-run]
 node dsh-migrate.mjs pack    --out <dir>        [--home <DSH_HOME>] [--with-credentials] [--with-git] [--with-plugin-data [dir,...]] [--force]
 node dsh-migrate.mjs restore --in <dir>         [--home <DSH_HOME>] [--workspace-root <dir>] [--no-install] [--force] [--dry-run]
 node dsh-migrate.mjs status                     [--home <DSH_HOME>]
@@ -64,6 +64,7 @@ Every command also accepts `--lang zh|en`.
 | `--with-git` | Include `.git` in workspace copies (off by default: it is large and rewrites badly). |
 | `--with-credentials` | Include `.credentials.yaml` (off by default — see below). |
 | `--no-install` | Skip `dsh plugin install` (dry runs, CI, or when you want to install by hand). |
+| `--no-delete` | Do not propagate deletions; keep the merge union-only. |
 | `--dry-run` | Print what would change, write nothing. Start here. |
 | `--force` | Run even if DSH appears to be running; also allows overwriting an existing bundle. |
 
@@ -99,7 +100,16 @@ Both machines edited the same thing:
 
 `*.conflict-*` files stay on the machine that produced them and are never synced.
 
-Deletions do **not** propagate. `sync` merges sets, so if you delete a session on one machine it comes back on the next sync. Delete on both, or archive it instead.
+## How deletions travel
+
+A pure union would resurrect anything you delete on one machine — the other machine still has it and pushes it right back. So `sync` also keeps tombstones:
+
+- A file that was present at the last sync and is gone now counts as deleted: the relay copy is removed too, and a tombstone (path + time) is recorded in the relay's `state.json`.
+- The other machine applies that tombstone — but **only if its own copy is older than the tombstone**. A file you edited after the deletion survives (it "resurrects"), is pushed back to the relay, and both machines agree again on the next round.
+- These paths never propagate deletions: `storages/workspace.json` and a profile's `package.json` / `cordis*.yml` / `pnpm-lock.yaml` / `pnpm-workspace.yaml`. DSH and the plugin manager recreate them; deleting them by mistake costs far more than keeping one extra copy.
+- Tombstones live in the relay (`state.json`, kept 30 days). Each machine's "last snapshot" lives in `~/.dsh/.dsh-migrate-state.json` and is never synced — if it were shared, a machine would mistake files it has not pulled yet for deletions.
+
+Pass `--no-delete` to keep the old behaviour: merge only, deleted files come back on the next sync.
 
 ## How it works
 

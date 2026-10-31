@@ -46,7 +46,7 @@ DeepSeek Harness 把所有东西都放在本机：`~/.dsh` 里是会话日志、
 ## 命令行
 
 ```text
-node dsh-migrate.mjs sync    --with <中转目录> [--home <DSH_HOME>] [--with-plugin-data [目录名,...]] [--no-install] [--dry-run]
+node dsh-migrate.mjs sync    --with <中转目录> [--home <DSH_HOME>] [--with-plugin-data [目录名,...]] [--no-install] [--no-delete] [--dry-run]
 node dsh-migrate.mjs pack    --out <目录>      [--home <DSH_HOME>] [--with-credentials] [--with-git] [--with-plugin-data [目录名,...]] [--force]
 node dsh-migrate.mjs restore --in <目录>       [--home <DSH_HOME>] [--workspace-root <目录>] [--no-install] [--force] [--dry-run]
 node dsh-migrate.mjs status                    [--home <DSH_HOME>]
@@ -64,6 +64,7 @@ node dsh-migrate.mjs --version | --help
 | `--with-git` | 工作区里连 `.git` 一起搬（默认不搬：体积大，且跨机容易出问题）。 |
 | `--with-credentials` | 连 `.credentials.yaml` 一起搬（默认不搬——见下）。 |
 | `--no-install` | 跳过 `dsh plugin install`（只想看改动、或准备手工装）。 |
+| `--no-delete` | 不传播删除：只做并集合并，本机删掉的文件不会让对面也删。 |
 | `--dry-run` | 只打印会做什么，不写任何东西。**建议第一次先跑这个。** |
 | `--force` | 应用还在运行时也照跑；也用于覆盖已有的中转站。 |
 
@@ -97,7 +98,16 @@ node dsh-migrate.mjs --version | --help
 
 `*.conflict-*` 文件只留在产生它的那台机器上，不参与同步。
 
-**删除不会传播。** `sync` 合并的是集合，所以你在一边删掉的会话，下次同步会回来。要删就在两边都删，或者用归档。
+## 删除怎么传播
+
+只做并集的话，一边删掉的文件会被另一边推回来——删了等于没删。所以同步时也记「墓碑」：
+
+- 上次同步时还在、这次本机没有的文件，视为删除：中转站里那份一起删掉，并记一条墓碑（路径 + 时间）。
+- 另一台同步时按墓碑删本地那份——**但只在本机这份比墓碑更旧时才删**。删完之后你又改过的文件会留下（复活），并重新推回中转站，下一轮两台又一致。
+- 以下路径不参与删除传播：`storages/workspace.json`、profile 的 `package.json` / `cordis*.yml` / `pnpm-lock.yaml` / `pnpm-workspace.yaml`。这些是 DSH 和插件管理器会自己重建的东西，删错代价远大于多留一份。
+- 墓碑在中转站的 `state.json` 里，保留 30 天；本机「上次快照」存在 `~/.dsh/.dsh-migrate-state.json`（只在本机，不同步——否则另一台会把自己没拉过的新文件当成删除）。
+
+不想要这个行为，加 `--no-delete`：只合并不删，删掉的东西下次同步会回来。
 
 ## 它是怎么做到的
 

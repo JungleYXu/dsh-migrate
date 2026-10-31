@@ -183,7 +183,11 @@ const EN_RULES = [
   [/^ 中转站：(.+)$/, ' Relay: $1'],
   [/^ 会话：拉入 (\d+) \/ 推出 (\d+)$/, ' Sessions: pulled $1 / pushed $2'],
   [/^ 文件：拉入 (\d+) \/ 推出 (\d+) \/ 冲突 (\d+)$/, ' Files: pulled $1 / pushed $2 / conflicts $3'],
-  [/^  冲突文件已保留本地版本，另一份另存为 \.conflict-<时间戳>$/, '  Conflicting files kept their local version; the other copy was saved as .conflict-<timestamp>'],
+  [/^ 删除：本机删 (\d+) \/ 中转站删 (\d+) \/ 复活留用 (\d+)$/, ' Deletions: removed locally $1 / removed from relay $2 / kept after resurrection $3'],
+  [/^ 删除：本机删 (\d+) \/ 中转站删 (\d+)$/, ' Deletions: removed locally $1 / removed from relay $2'],
+  [/^ 删除失败 (.+)：(.+)$/, ' Could not delete $1: $2'],
+  [/^ 删除中转站文件失败 (.+)：(.+)$/, ' Could not remove $1 from the relay: $2'],
+  [/^ 冲突文件已保留本地版本，另一份另存为 \.conflict-<时间戳>$/, ' Conflicting files kept their local version; the other copy was saved as .conflict-<timestamp>'],
   [/^  冲突会话已按「最后写入时间新的赢」收敛，旧的一份另存为 \.conflict-<时间戳>$/, '  Conflicting sessions were resolved by last-write-wins; the older copy was saved as .conflict-<timestamp>'],
   [/^  两台机器现在内容一致，可以直接换机继续。$/, '  Both machines now hold the same content — you can switch machines.'],
   [/^ (.+) 两边都改过，采用本机那份（另一份另存 \.conflict-<时间戳>）$/, ' $1 was modified on both sides — keeping the local copy (the other saved as .conflict-<timestamp>)'],
@@ -981,7 +985,7 @@ function cmdRestore(opts) {
  */
 const MANAGED_DIRS = new Set(['sessions', 'storages', 'profiles']);
 const NEVER_SYNC_DIRS = new Set(['node_modules', 'dsh-runtimes', 'cache', 'logs', '.git']);
-const NEVER_SYNC_FILES = new Set(['.credentials.yaml', 'manifest.json', '.DS_Store', 'Thumbs.db']);
+const NEVER_SYNC_FILES = new Set(['.credentials.yaml', 'manifest.json', '.dsh-migrate-state.json', '.DS_Store', 'Thumbs.db']);
 const VOLATILE_RE = /(^|[\\/])(\.migrate-tmp|.*\.lock|~.*\.tmp)$/;
 
 /** DSH home 顶层里需要参与同步的目录（sessions/storages/profiles 除外）。 */
@@ -1268,7 +1272,15 @@ function reRootPath(p, oldProfile, newProfile) {
 
 function writeIndex(file, json) {
   fs.mkdirSync(path.dirname(file), { recursive: true });
-  fs.writeFileSync(file, JSON.stringify(json, null, 2));
+  const text = JSON.stringify(json, null, 2);
+  // 内容没变就不重写：mtime 一变，另一边就会把它当成新改动，来回传个没完。
+  try {
+    if (fs.readFileSync(file, 'utf8') === text) return false;
+  } catch {
+    /* 文件还不存在，正常往下写 */
+  }
+  fs.writeFileSync(file, text);
+  return true;
 }
 
 /** 建立「本地工作区 <-> 包内工作区」的映射，缺的一侧补上。 */
@@ -1356,30 +1368,33 @@ function syncWorkspaceIndex(home, dir, mapping, idx, dry) {
     if (!dry) writeIndex(idx.file, json);
     idx.json = json;
   }
-  // 包内
+  // 包内：拿本地那份当模板（字段、键序都一致），只把 path 换成规范路径。
+  // 两边各自序列化会让同一个索引在每台机器上长得不一样，合并时永远「有差异」。
   const bIdxFile = path.join(dir, 'home', 'storages', 'workspace.json');
-  const bJson = exists(bIdxFile)
-    ? JSON.parse(fs.readFileSync(bIdxFile, 'utf8'))
-    : { unit: { name: 'workspace', version: 2 }, global: { initialized: true, workspaceIds: [], archivedSessionIds: [], pinnedSessionIds: [] }, tables: { workspaces: {} } };
+  const base = idx.json || {
+    unit: { name: 'workspace', version: 2 },
+    global: { initialized: true, workspaceIds: [], archivedSessionIds: [], pinnedSessionIds: [] },
+    tables: { workspaces: {} },
+  };
+  const bJson = JSON.parse(JSON.stringify(base));
   bJson.tables = bJson.tables || { workspaces: {} };
   bJson.tables.workspaces = bJson.tables.workspaces || {};
   bJson.global = bJson.global || {};
   bJson.global.workspaceIds = bJson.global.workspaceIds || [];
   for (const m of mapping) {
     const id = m.bundle ? m.bundle.id : m.localId;
-    const cur = bJson.tables.workspaces[id];
-    if (cur) {
-      if (cur.path !== m.bundlePath) cur.path = m.bundlePath;
-      cur.sessionIds = cur.sessionIds || [];
-    } else {
-      bJson.tables.workspaces[id] = {
-        path: m.bundlePath,
-        title: path.basename(m.bundlePath),
-        sessionIds: [],
-        createdAt: new Date().toISOString(),
-        updatedAt: new Date().toISOString(),
-      };
-    }
+    const cur = bJson.tables.workspaces[m.localId];
+    const entry = cur || {
+      path: m.bundlePath,
+      title: path.basename(m.bundlePath),
+      sessionIds: [],
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+    };
+    entry.path = m.bundlePath;
+    entry.sessionIds = entry.sessionIds || [];
+    bJson.tables.workspaces[id] = entry;
+    if (id !== m.localId) delete bJson.tables.workspaces[m.localId];
     if (!bJson.global.workspaceIds.includes(id)) bJson.global.workspaceIds.push(id);
     if (!bJson.global.defaultWorkspaceId) bJson.global.defaultWorkspaceId = id;
   }
@@ -1801,6 +1816,188 @@ function mergeProfiles(home, dir, mapping, dry, stats) {
   return localChanged;
 }
 
+/* -------------------------------------------------------------- 墓碑记录 */
+// 同步只增不删时，一台机器上删掉的文件会被另一台原样推回来。这里用「墓碑」
+// 记住「上次快照里有的文件，这次不见了」，让删除也能跨机传播；同时保证
+// 「删完之后又在另一台改过」的文件不会被误删（按修改时间判断，新的赢）。
+
+const STATE_VERSION = 1;
+const TOMB_KEEP_MS = 30 * 24 * 3600 * 1000;
+const TOMB_MAX = 5000;
+
+// 这些路径宁可不传播删除：DSH 自己会重建，删错了代价远大于多留一份。
+const PROTECTED_LOCAL_RE = [
+  /^storages[\\/]workspace\.json$/i,
+  /^profiles[\\/][^\\/]+[\\/](package\.json|cordis\.yml|cordis\.patch\.yml|pnpm-lock\.yaml|pnpm-workspace\.yaml)$/i,
+];
+
+function isProtectedLocal(rel) {
+  const norm = rel.replace(/\\/g, '/');
+  return PROTECTED_LOCAL_RE.some((re) => re.test(norm));
+}
+
+function scopeSkip(withGit, hasTopGit) {
+  return (rel) => {
+    const parts = rel.split(/[\\/]/);
+    if (parts.some((p) => NEVER_SYNC_DIRS.has(p))) return true;
+    if (!withGit && (hasTopGit ? parts[0] === '.git' : parts.includes('.git'))) return true;
+    const base = parts[parts.length - 1];
+    if (NEVER_SYNC_FILES.has(base)) return true;
+    if (VOLATILE_RE.test(rel)) return true;
+    return false;
+  };
+}
+
+function walkPaths(root, skip) {
+  const out = new Set();
+  if (!isDir(root)) return out;
+  const walk = (rel) => {
+    let ents;
+    try {
+      ents = fs.readdirSync(path.join(root, rel), { withFileTypes: true });
+    } catch {
+      return;
+    }
+    for (const e of ents) {
+      const r = rel ? path.join(rel, e.name) : e.name;
+      if (skip && skip(r)) continue;
+      if (e.isDirectory()) walk(r);
+      else if (e.isFile()) out.add(r);
+    }
+  };
+  walk('');
+  return out;
+}
+
+function pruneEmptyDirs(file, root) {
+  let d = path.dirname(file);
+  const stop = path.resolve(root);
+  while (path.resolve(d) !== stop && path.resolve(d).startsWith(stop + path.sep)) {
+    try {
+      if (fs.readdirSync(d).length) return;
+      fs.rmdirSync(d);
+    } catch {
+      return;
+    }
+    d = path.dirname(d);
+  }
+}
+
+function stateFile(dir) {
+  return path.join(dir, 'state.json');
+}
+
+// 墓碑放在中转站里（两台机器共用一份账本），每台机器的「上次快照」放在本机 ——
+// 快照如果也共用，一台机器会把另一台新增、自己还没拉过的文件误判成「被删了」。
+function localStateFile(home) {
+  return path.join(home, '.dsh-migrate-state.json');
+}
+
+function loadState(dir) {
+  const f = stateFile(dir);
+  if (!exists(f)) return { format: STATE_VERSION, deleted: [] };
+  try {
+    const s = JSON.parse(fs.readFileSync(f, 'utf8').replace(/^\uFEFF/, ''));
+    return { format: STATE_VERSION, deleted: Array.isArray(s.deleted) ? s.deleted : [] };
+  } catch {
+    return { format: STATE_VERSION, deleted: [] };
+  }
+}
+
+function saveState(dir, state) {
+  const cutoff = Date.now() - TOMB_KEEP_MS;
+  state.deleted = state.deleted.filter((t) => t && t.at > cutoff).slice(-TOMB_MAX);
+  writeIndex(stateFile(dir), { format: STATE_VERSION, deleted: state.deleted });
+}
+
+function loadLocalState(home) {
+  const f = localStateFile(home);
+  if (!exists(f)) return { format: STATE_VERSION, snapshot: {} };
+  try {
+    const s = JSON.parse(fs.readFileSync(f, 'utf8').replace(/^\uFEFF/, ''));
+    return { format: STATE_VERSION, snapshot: s.snapshot || {} };
+  } catch {
+    return { format: STATE_VERSION, snapshot: {} };
+  }
+}
+
+function saveLocalState(home, state) {
+  writeIndex(localStateFile(home), { format: STATE_VERSION, snapshot: state.snapshot });
+}
+
+/** 应用别的机器记下的墓碑：本机这份没被改过就删掉；改过就留下（复活）。 */
+function applyTombstones(root, scope, state, dry, stats) {
+  if (!isDir(root)) return;
+  const keep = [];
+  for (const t of state.deleted) {
+    if (!t || t.scope !== scope || !t.path) {
+      keep.push(t);
+      continue;
+    }
+    const abs = path.join(root, t.path);
+    const st = statOrNull(abs);
+    if (!st) {
+      // 本机也没有这份：留着墓碑，好让另一台（还没同步的那台）也删掉。
+      keep.push(t);
+      continue;
+    }
+    if (st.mtimeMs >= t.at) {
+      stats.resurrected++;
+      continue; // 删完之后又被改过：文件留下，墓碑作废
+    }
+    if (dry) {
+      stats.deletedPulled++;
+      keep.push(t);
+      continue;
+    }
+    try {
+      fs.rmSync(abs, { force: true });
+      pruneEmptyDirs(abs, root);
+      stats.deletedPulled++;
+    } catch (e) {
+      warn(`  删除失败 ${t.path}：${e.message}`);
+      keep.push(t);
+    }
+  }
+  state.deleted = keep;
+}
+
+/** 上次快照里有、这次本机没了 → 从中转站删掉并记墓碑，避免被另一台推回来。 */
+function detectLocalDeletions(root, scope, prev, bundleRoot, state, dry, stats, skip) {
+  if (!prev || !prev.size) return;
+  const cur = walkPaths(root, skip);
+  for (const p of prev) {
+    if (cur.has(p)) continue;
+    if (isProtectedLocal(p)) continue;
+    const b = path.join(bundleRoot, p);
+    if (!exists(b)) continue;
+    if (dry) {
+      stats.deletedPushed++;
+      continue;
+    }
+    try {
+      fs.rmSync(b, { force: true });
+      pruneEmptyDirs(b, bundleRoot);
+    } catch (e) {
+      warn(`  删除中转站文件失败 ${p}：${e.message}`);
+      continue;
+    }
+    state.deleted.push({ scope, path: p, at: Date.now() });
+    stats.deletedPushed++;
+  }
+}
+
+function recordSnapshot(root, scope, state, skip) {
+  state.snapshot[scope] = [...walkPaths(root, skip)].sort();
+}
+
+function prevSnapshot(state, scope) {
+  const arr = state.snapshot[scope];
+  return new Set(Array.isArray(arr) ? arr : []);
+}
+
+/* ------------------------------------------------------------------- sync */
+
 function cmdSync(opts) {
   const dir = path.resolve(opts.with || opts.in);
   const home = path.resolve(opts.home || defaultHome());
@@ -1858,25 +2055,55 @@ function cmdSync(opts) {
     }
   }
 
-  const stats = { pulled: 0, pushed: 0, unchanged: 0, fileConflicts: 0, sessionConflicts: 0, sessionsPulled: 0, sessionsPushed: 0 };
+  const stats = {
+    pulled: 0,
+    pushed: 0,
+    unchanged: 0,
+    fileConflicts: 0,
+    sessionConflicts: 0,
+    sessionsPulled: 0,
+    sessionsPushed: 0,
+    deletedPulled: 0,
+    deletedPushed: 0,
+    resurrected: 0,
+  };
   const withGit = !!opts.withGit;
+  const noDelete = !!opts.noDelete;
+  const state = loadState(dir); // 中转站：墓碑账本（两台共用）
+  const lstate = loadLocalState(home); // 本机：上次快照（各自一份）
+  const bundleHome = path.join(dir, 'home');
+  const homeSkip = scopeSkip(withGit, false);
+
+  /* 0) 删除传播：先处理墓碑，再找出「上次有、这次没了」的文件。
+        必须放在合并之前 —— 合并会把中转站那份重新拉回来，之后就分不清是删除还是缺失。 */
+  if (!noDelete) {
+    applyTombstones(home, 'home', state, dry, stats);
+    detectLocalDeletions(home, 'home', prevSnapshot(lstate, 'home'), bundleHome, state, dry, stats, homeSkip);
+  }
 
   /* 1) 工作区文件 */
   step('工作区文件');
   for (const m of mapping) {
+    const scope = `ws:${m.bundleDir}`;
+    const bundleRoot = path.join(dir, m.bundleDir);
     const skip = (rel) => {
       const parts = rel.split(/[\\/]/);
       if (parts.includes('node_modules')) return true;
       if (!withGit && parts[0] === '.git') return true;
       return false;
     };
+    if (!noDelete) {
+      applyTombstones(m.localPath, scope, state, dry, stats);
+      detectLocalDeletions(m.localPath, scope, prevSnapshot(lstate, scope), bundleRoot, state, dry, stats, skip);
+    }
     const before = { ...stats };
-    mergeTree(m.localPath, path.join(dir, m.bundleDir), {
+    mergeTree(m.localPath, bundleRoot, {
       skip,
       dry,
       stats,
       label: path.basename(m.localPath),
     });
+    if (!dry) recordSnapshot(m.localPath, scope, lstate, skip);
     const dP = stats.pulled - before.pulled;
     const dQ = stats.pushed - before.pushed;
     if (dP || dQ) log(`  ${path.basename(m.localPath)}：拉入 ${dP} 个文件 / 推出 ${dQ} 个`);
@@ -1892,10 +2119,12 @@ function cmdSync(opts) {
   if (localJson && bundleJson) {
     mergeSessionIds(localJson, bundleJson, mapping);
     if (!dry) {
-      writeIndex(idx.file, localJson);
-      writeIndex(path.join(dir, 'home', 'storages', 'workspace.json'), bundleJson);
+      const wroteLocal = writeIndex(idx.file, localJson);
+      const wroteBundle = writeIndex(path.join(dir, 'home', 'storages', 'workspace.json'), bundleJson);
+      if (wroteLocal || wroteBundle) log('  两边的 workspace.json 已合并（工作区 id、会话列表取并集）');
+    } else {
+      log('  两边的 workspace.json 已合并（工作区 id、会话列表取并集）');
     }
-    log('  两边的 workspace.json 已合并（工作区 id、会话列表取并集）');
   }
 
   /* 4) 其它存储 */
@@ -1905,16 +2134,21 @@ function cmdSync(opts) {
 
   /* 5) 插件数据目录与附件 */
   step('附件与插件数据');
-  const bundleHome = path.join(dir, 'home');
   const dataDirs = new Set([...discoverDataDirs(home), ...discoverDataDirs(bundleHome)]);
   for (const name of [...dataDirs].sort()) {
     const la = path.join(home, name);
     const lb = path.join(bundleHome, name);
     if (!isDir(la) && !isDir(lb)) continue;
+    const scope = `dir:${name}`;
+    if (!noDelete && isDir(la)) {
+      applyTombstones(la, scope, state, dry, stats);
+      detectLocalDeletions(la, scope, prevSnapshot(lstate, scope), lb, state, dry, stats, homeSkip);
+    }
     fs.mkdirSync(la, { recursive: true });
     fs.mkdirSync(lb, { recursive: true });
     const before = { ...stats };
     mergeTree(la, lb, { dry, stats, label: name, contentAddressed: name === 'attachments' });
+    if (!dry) recordSnapshot(la, scope, lstate, homeSkip);
     const dP = stats.pulled - before.pulled;
     const dQ = stats.pushed - before.pushed;
     if (dP || dQ) log(`  ${name}：拉入 ${dP} 个文件 / 推出 ${dQ} 个`);
@@ -1942,18 +2176,26 @@ function cmdSync(opts) {
         if (localWins) copyFilePreserve(x, y);
         else copyFilePreserve(y, x);
         warn(`  ${f} 两边都改过，采用${localWins ? '本机' : '中转站'}那份（另一份另存 .conflict-<时间戳>）`);
+        stats.fileConflicts++;
         const now = new Date();
         fs.utimesSync(x, now, now);
         fs.utimesSync(y, now, now);
         continue;
       }
       if (dry) continue;
-      if (sx.mtimeMs > sy.mtimeMs) copyFilePreserve(x, y);
-      else copyFilePreserve(y, x);
+      if (sx.mtimeMs > sy.mtimeMs) {
+        copyFilePreserve(x, y);
+        stats.pushed++;
+      } else {
+        copyFilePreserve(y, x);
+        stats.pulled++;
+      }
     } else if (sx && !sy && !dry) {
       copyFilePreserve(x, y);
+      stats.pushed++;
     } else if (!sx && sy && !dry) {
       copyFilePreserve(y, x);
+      stats.pulled++;
     }
   }
   // 插件数据目录（在 DSH home 之外的用户目录里）：默认不动，--with-plugin-data 才合并
@@ -1967,10 +2209,16 @@ function cmdSync(opts) {
     for (const { label, abs } of pdEntries) {
       const bu = path.join(dir, PLUGIN_DATA_ROOT, label);
       if (!isDir(abs) && !isDir(bu)) continue;
+      const scope = `pd:${label}`;
+      if (!noDelete && isDir(abs)) {
+        applyTombstones(abs, scope, state, dry, stats);
+        detectLocalDeletions(abs, scope, prevSnapshot(lstate, scope), bu, state, dry, stats, homeSkip);
+      }
       fs.mkdirSync(abs, { recursive: true });
       fs.mkdirSync(bu, { recursive: true });
       const before = { ...stats };
       mergeTree(abs, bu, { dry, stats, label });
+      if (!dry) recordSnapshot(abs, scope, lstate, homeSkip);
       const dP = stats.pulled - before.pulled;
       const dQ = stats.pushed - before.pushed;
       log(`  ${label}：拉入 ${dP} 个文件 / 推出 ${dQ} 个`);
@@ -1998,6 +2246,9 @@ function cmdSync(opts) {
     mf.syncedAt = new Date().toISOString();
     mf.syncedBy = { hostname: os.hostname(), username: os.userInfo().username, home, userProfile: os.homedir() };
     writeIndex(mfFile, mf);
+    recordSnapshot(home, 'home', lstate, homeSkip);
+    saveLocalState(home, lstate);
+    saveState(dir, state);
   }
 
   /* 8) 需要时装插件 */
@@ -2019,6 +2270,9 @@ function cmdSync(opts) {
   log(`  中转站：${dir}`);
   log(`  会话：拉入 ${stats.sessionsPulled} / 推出 ${stats.sessionsPushed}`);
   log(`  文件：拉入 ${stats.pulled} / 推出 ${stats.pushed} / 冲突 ${stats.fileConflicts}`);
+  if (stats.deletedPulled || stats.deletedPushed || stats.resurrected) {
+    log(`  删除：本机删 ${stats.deletedPulled} / 中转站删 ${stats.deletedPushed}${stats.resurrected ? ` / 复活留用 ${stats.resurrected}` : ''}`);
+  }
   if (stats.fileConflicts) warn('  冲突文件已保留本地版本，另一份另存为 .conflict-<时间戳>');
   if (stats.sessionConflicts) warn('  冲突会话已按「最后写入时间新的赢」收敛，旧的一份另存为 .conflict-<时间戳>');
   if (!dry) log('  两台机器现在内容一致，可以直接换机继续。');
@@ -2062,7 +2316,7 @@ const HELP_ZH = `dsh-migrate ${VERSION} — 在两台电脑之间接力使用 De
     两台机器轮流各双击一次，内容就接上了，谁都不用重新装、不用重新登录。
 
   命令行
-  node dsh-migrate.mjs sync    --with <中转目录> [--home <DSH_HOME>] [--with-plugin-data [目录名,...]] [--no-install] [--dry-run]
+  node dsh-migrate.mjs sync    --with <中转目录> [--home <DSH_HOME>] [--with-plugin-data [目录名,...]] [--no-install] [--no-delete] [--dry-run]
   node dsh-migrate.mjs pack    --out <目录>   [--home <DSH_HOME>] [--with-credentials] [--with-git] [--with-plugin-data [目录名,...]] [--force]
   node dsh-migrate.mjs restore --in  <目录>   [--home <DSH_HOME>] [--workspace-root <目录>] [--no-install] [--force] [--dry-run]
   node dsh-migrate.mjs status                 [--home <DSH_HOME>]
@@ -2070,6 +2324,7 @@ const HELP_ZH = `dsh-migrate ${VERSION} — 在两台电脑之间接力使用 De
 
   选项
   --lang zh|en        输出语言（默认跟随系统区域；也可用 DSH_MIGRATE_LANG 指定）
+  --no-delete         sync 只合并、不传播删除（默认会把「本机删掉的文件」同步删掉对面那份）
 
 说明：
   * 运行前请**完全退出** DeepSeek Harness（关窗口不算，从托盘退出）。
@@ -2077,6 +2332,10 @@ const HELP_ZH = `dsh-migrate ${VERSION} — 在两台电脑之间接力使用 De
   * sync 是并集合并：两边各自新增的会话、工作区文件、插件都会保留；
     同一份文件/会话两边都改过时，按「后写的赢」收敛，另一份另存 .conflict-<时间戳> 留档，只留在本机、不再来回同步。
   * pack/restore 是单向快照：换新机器、或想回到某个确定状态时用。
+  * 删除也会传播：在某台机器上删掉的文件，下一次同步时另一台也会删掉它（中转站里那份一起清掉），
+    否则对面一同步又会被推回来、删了等于没删。只有「本机这份比删除时间还新」时才留下（删完又改过）。
+    DSH 自己会重建的路径（workspace.json、profile 的 package.json / cordis*.yml / 锁文件）不参与删除传播；
+    不想要这个行为就加 --no-delete。
   * 同步范围是「发现式」的：DSH home 下的会话、存储、插件清单，加上工作区目录里的全部文件，
     以及 DSH home 里其它顶层目录（插件自己建的数据目录，装了什么插件就带什么，不需要预先知道）。
     始终跳过 node_modules、dsh-runtimes、cache、logs；.credentials.yaml 不搬（每台机器各自登录一次）。
@@ -2096,7 +2355,7 @@ const HELP_EN = `dsh-migrate ${VERSION} — move DeepSeek Harness between two co
     Alternate one double-click per machine and the two stay in step — no reinstall, no re-login.
 
   Command line
-  node dsh-migrate.mjs sync    --with <relay-dir> [--home <DSH_HOME>] [--with-plugin-data [dir,...]] [--no-install] [--dry-run]
+  node dsh-migrate.mjs sync    --with <relay-dir> [--home <DSH_HOME>] [--with-plugin-data [dir,...]] [--no-install] [--no-delete] [--dry-run]
   node dsh-migrate.mjs pack    --out <dir>        [--home <DSH_HOME>] [--with-credentials] [--with-git] [--with-plugin-data [dir,...]] [--force]
   node dsh-migrate.mjs restore --in <dir>         [--home <DSH_HOME>] [--workspace-root <dir>] [--no-install] [--force] [--dry-run]
   node dsh-migrate.mjs status                     [--home <DSH_HOME>]
@@ -2104,6 +2363,7 @@ const HELP_EN = `dsh-migrate ${VERSION} — move DeepSeek Harness between two co
 
   Options
   --lang zh|en        Output language (defaults to the system locale; DSH_MIGRATE_LANG also works)
+  --no-delete         sync merges only; do not propagate deletions to the other machine
 
 Notes:
   * Quit DeepSeek Harness **completely** before running (closing the window is not enough; exit from
@@ -2112,6 +2372,11 @@ Notes:
     When the same file or session changed on both machines, the later write wins and the other copy is
     saved as .conflict-<timestamp> — it stays on that machine and is not synced again.
   * pack/restore are one-way snapshots: for a brand-new machine, or to return to a known state.
+  * Deletions propagate: a file you delete on one machine is deleted on the other at its next sync
+    (the relay copy goes too) — otherwise the other machine would just push it back.
+    A copy that is *newer* than the deletion survives (you edited it after deleting); DSH-owned paths
+    (workspace.json, profile package.json / cordis*.yml / lock files) are never deleted this way.
+    Pass --no-delete to disable the whole feature.
   * The sync scope is discovered, not hard-coded: every session, storage file and plugin manifest under
     the DSH home, every file in the workspace, plus any other top-level directory in the DSH home
     (a plugin's own data directory travels with the plugin, without this tool knowing about it).

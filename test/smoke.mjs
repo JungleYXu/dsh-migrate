@@ -282,6 +282,51 @@ try {
 
   en = runEnv({ DSH_MIGRATE_LANG: 'zh' }, '--help');
   check(CJK.test(en.stdout), 'DSH_MIGRATE_LANG=zh keeps Chinese output');
+
+  console.log('\n[9] deletion propagation');
+  const syncA = () => run('sync', '--with', relay, '--home', A.home, '--workspace-root', path.dirname(A.ws), '--no-install', '--force');
+  const syncB = () => run('sync', '--with', relay, '--home', B.home, '--workspace-root', path.dirname(B.ws), '--no-install', '--force');
+
+  fs.rmSync(path.join(A.home, 'made-up-plugin', 'state.json'), { force: true });
+  fs.rmSync(path.join(A.ws, 'README.md'), { force: true });
+  r = syncA();
+  check(r.status === 0, 'sync after local deletion exits 0', r.stderr);
+  check(!exists(relay, 'home', 'made-up-plugin', 'state.json'), 'deleted file leaves the relay');
+  check(!exists(relay, 'ws-0', 'README.md'), 'deleted workspace file leaves the relay');
+  check(/中转站删 2|from relay 2/.test(r.stdout), 'sync reports the propagated deletions', r.stdout.match(/.*删除.*/)?.[0]);
+
+  r = syncB();
+  check(r.status === 0, 'peer sync after deletion exits 0', r.stderr);
+  check(!exists(B.home, 'made-up-plugin', 'state.json'), 'deletion applied on the peer');
+  check(!exists(B.ws, 'README.md'), 'workspace deletion applied on the peer');
+
+  r = syncB();
+  check(/删除/.test(r.stdout) === false || /本机删 0 \/ 中转站删 0/.test(r.stdout), 'deletions are reported once, not every round');
+
+  console.log('\n[10] resurrection: a copy newer than the tombstone survives');
+  const extra = path.join(A.home, 'resurrect.txt');
+  fs.writeFileSync(extra, 'first\n');
+  syncA();
+  syncB();
+  check(exists(B.home, 'resurrect.txt'), 'new file reached the peer before the test');
+  fs.rmSync(extra, { force: true });
+  r = syncA();
+  check(!exists(relay, 'home', 'resurrect.txt'), 'deletion removed the relay copy');
+  fs.writeFileSync(path.join(B.home, 'resurrect.txt'), 'edited after the deletion\n');
+  r = syncB();
+  check(r.status === 0, 'peer sync exits 0', r.stderr);
+  check(exists(B.home, 'resurrect.txt'), 'copy edited after the deletion is kept');
+  check(/复活留用 1|kept after resurrection 1/.test(r.stdout), 'sync reports the resurrection', r.stdout.match(/.*删除.*/)?.[0]);
+  check(exists(relay, 'home', 'resurrect.txt'), 'resurrected file is pushed back to the relay');
+  syncA();
+  check(exists(A.home, 'resurrect.txt'), 'the machine that deleted gets the file back');
+
+  console.log('\n[11] --no-delete keeps the union-only behaviour');
+  fs.rmSync(path.join(B.home, 'resurrect.txt'), { force: true });
+  r = run('sync', '--with', relay, '--home', B.home, '--workspace-root', path.dirname(B.ws), '--no-install', '--force', '--no-delete');
+  check(r.status === 0, '--no-delete exits 0', r.stderr);
+  check(exists(B.home, 'resurrect.txt'), '--no-delete restores the file instead of deleting it elsewhere');
+  check(exists(relay, 'home', 'resurrect.txt'), '--no-delete leaves the relay untouched');
 } finally {
   fs.rmSync(root, { recursive: true, force: true });
 }
