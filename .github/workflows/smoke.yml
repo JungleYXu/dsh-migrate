@@ -1,0 +1,19 @@
+name: smoke
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    # The tool only targets Windows, so the test must run there too.
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - name: Syntax check
+        run: node --check dsh-migrate.mjs
+      - name: Smoke test
+        run: node test/smoke.mjs
