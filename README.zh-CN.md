@@ -53,9 +53,12 @@ node dsh-migrate.mjs status                    [--home <DSH_HOME>]
 node dsh-migrate.mjs --version | --help
 ```
 
+所有命令都接受 `--lang zh|en`。
+
 | 参数 | 作用 |
 | --- | --- |
 | `--home` | 要操作的 DSH home，默认 `$DSH_HOME`，再退回 `~/.dsh`。测副本时很有用。 |
+| `--lang zh\|en` | 帮助与进度消息的语言，默认跟随系统区域；`DSH_MIGRATE_LANG` 等效。路径、会话标题、你自己的文件名不会被翻译。 |
 | `--workspace-root` | 本机工作区应该放在哪。当记录里的路径在本机不存在时用它。 |
 | `--with-plugin-data [目录名,...]` | 一并合并 `~/.dsh` 之外的插件数据目录。不带值：`~/.openviking`、`~/.hindsight`；带值：你点名的目录（相对 `~`）或绝对路径。 |
 | `--with-git` | 工作区里连 `.git` 一起搬（默认不搬：体积大，且跨机容易出问题）。 |

@@ -53,9 +53,12 @@ node dsh-migrate.mjs status                     [--home <DSH_HOME>]
 node dsh-migrate.mjs --version | --help
 ```
 
+Every command also accepts `--lang zh|en`.
+
 | Flag | Meaning |
 | --- | --- |
 | `--home` | DSH home to act on. Defaults to `$DSH_HOME`, then `~/.dsh`. Handy for testing against a copy. |
+| `--lang zh\|en` | Output language for the help text and progress messages. Defaults to the system locale; `DSH_MIGRATE_LANG` works too. Paths, session titles and user file names are never translated. |
 | `--workspace-root` | Where the workspace should live on this machine. Use it when the workspace is not at the recorded path. |
 | `--with-plugin-data [dir,...]` | Also merge plugin data directories outside `~/.dsh`. Without a value: `~/.openviking`, `~/.hindsight`. With a value: those names (relative to `~`) or absolute paths. |
 | `--with-git` | Include `.git` in workspace copies (off by default: it is large and rewrites badly). |

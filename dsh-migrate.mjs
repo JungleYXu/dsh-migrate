@@ -29,6 +29,224 @@ const FORMAT = 'dsh-migrate/1';
 const ZSTD_MAGIC = 0xfd2fb528;
 const CHECKSUM = { params: { [zlib.constants.ZSTD_c_checksumFlag]: 1 } };
 
+/* ------------------------------------------------------------------- i18n */
+
+/*
+ * 输出语言：--lang zh|en > DSH_MIGRATE_LANG > 系统区域（zh* 用中文，其余英文）。
+ * 文案以中文写在调用点（读代码时最直观），英文靠下面的规则表在输出层替换。
+ * 规则按「渲染后的整行」匹配，所以模板字符串里的变量已经填好，可以用捕获组带过去。
+ * 只有用户可见的输出过这层；日志内容、路径、会话标题一律原样。
+ */
+const LANGS = ['zh', 'en'];
+
+function detectLang() {
+  const scan = (args) => {
+    for (let i = 0; i < args.length; i++) {
+      if (args[i] === '--lang' && args[i + 1]) return args[i + 1];
+      if (args[i].startsWith('--lang=')) return args[i].slice(7);
+    }
+    return null;
+  };
+  const fromArg = scan(process.argv.slice(2));
+  const fromEnv = process.env.DSH_MIGRATE_LANG || null;
+  for (const v of [fromArg, fromEnv]) {
+    if (!v) continue;
+    const low = String(v).toLowerCase();
+    if (LANGS.includes(low)) return low;
+    if (low.startsWith('zh')) return 'zh';
+    if (low.startsWith('en')) return 'en';
+  }
+  try {
+    const loc = String(Intl.DateTimeFormat().resolvedOptions().locale || '').toLowerCase();
+    return loc.startsWith('zh') ? 'zh' : 'en';
+  } catch {
+    return 'en';
+  }
+}
+
+const LANG = detectLang();
+
+/** [中文正则, 英文替换]；按顺序匹配，每条命中的都替换一次（一行里可能有多段中文）。 */
+const EN_RULES = [
+  // ---- 启动 / 守卫
+  [/^\[x\] 当前 Node 是 (.+)，没有内置 zstd 接口（需要 Node 22\.15\+ 或 24\+）。$/, '[x] This Node is $1 and has no built-in zstd (Node 22.15+ or 24+ is required).'],
+  [/^    请用 DSH 自带的 Node 运行本工具：双击 dsh-migrate\.cmd 即可（它会自动找）。$/, '    Run this tool with the Node bundled with DSH: double-click dsh-migrate.cmd (it finds it for you).'],
+  [/^DeepSeek Harness 还在运行，先完全退出它再继续：$/, 'DeepSeek Harness is still running. Quit it completely before continuing:'],
+  [/^    \* 关窗口不算，要从托盘图标右键退出（或任务管理器里结束 DeepSeek Harness）。$/, '    * Closing the window is not enough — right-click the tray icon and exit, or end it in Task Manager.'],
+  [/^    \* 应用正在写会话日志和插件目录，这时候同步可能被文件占用打断，$/, '    * The app is writing session logs and plugin state; a sync now can be interrupted by locked files,'],
+  [/^      刚拉下来的会话也可能被它退出时用内存里的旧索引覆盖掉。$/, '      and sessions just pulled in can be overwritten by its in-memory index when it exits.'],
+  [/^    \* 确认无所谓、一定要现在跑，加 --force 跳过这个检查。$/, '    * If you accept that risk, add --force to skip this check.'],
+
+  // ---- 通用错误
+  [/^找不到 DSH home：(.+)$/, 'DSH home not found: $1'],
+  [/^输出目录在工作区内部：(.+)$/, 'Output directory is inside the workspace: $1'],
+  [/^  换一个位置（U 盘根目录最合适），或显式用 --out 指定。$/, '  Pick another location (the root of the USB stick is best), or pass --out explicitly.'],
+  [/^  提示：U 盘里请把 dsh-migrate\.cmd 放在 U 盘根目录再双击。$/, '  Hint: put dsh-migrate.cmd at the root of the USB stick and double-click it there.'],
+  [/^输出目录非空：(.+)（加 --force 覆盖）$/, 'Output directory is not empty: $1 (add --force to overwrite)'],
+  [/^不是迁移包（缺 manifest\.json）：(.+)$/, 'Not a migration bundle (manifest.json is missing): $1'],
+  [/^包格式 (.+) 与工具 (.+) 不一致，继续尝试$/, 'Bundle format $1 differs from this build ($2); trying anyway'],
+  [/^中转目录在工作区内部：(.+)$/, 'Relay directory is inside the workspace: $1'],
+  [/^  U 盘请放在根目录，或用 --with 指定别的位置。$/, '  Put the stick at a drive root, or point --with somewhere else.'],
+  [/^已创建空的 DSH home：(.+)$/, 'Created an empty DSH home: $1'],
+
+  // ---- pack
+  [/^打包 DSH home：(.+)$/, 'Packing the DSH home: $1'],
+  [/^打包工作区（(\d+) 个）$/, 'Packing workspaces ($1)'],
+  [/^工作区不存在，跳过：(.+)$/, 'Workspace does not exist, skipped: $1'],
+  [/^会话目录未找到（按路径键）：(.+)$/, 'No session directory for path key: $1'],
+  [/^插件数据目录（--with-plugin-data）$/, 'Plugin data directories (--with-plugin-data)'],
+  [/^  （这台机器上没有这些目录，跳过）$/, '  (none of these directories exist on this machine, skipped)'],
+  [/^  复制工具自身失败（不影响迁移）：(.+)$/, '  Could not copy the tool itself (migration is unaffected): $1'],
+  [/^完成$/, 'Done'],
+  [/^完成（--dry-run，未写入任何东西）$/, 'Done (--dry-run: nothing was written)'],
+  [/^  包目录：(.+)$/, '  Bundle: $1'],
+  [/^  总大小：(.+)$/, '  Total size: $1'],
+  [/^  工作区：(.+)$/, '  Workspace: $1'],
+  [/^  插件 profile：(.+)$/, '  Plugin profiles: $1'],
+  [/^(\d+) 个 link 依赖/, '$1 link dep(s)'],
+  [/(\d+) 个 link 依赖\)/, '$1 link dep(s))'],
+  [/^  凭证 \.credentials\.yaml 未打包（新机器重新登录即可）$/, '  Credentials (.credentials.yaml) are not included — sign in again on the new machine'],
+  [/^  插件数据：(.+)$/, '  Plugin data: $1'],
+  [/^接下来$/, 'Next'],
+  [/^  把整个 U 盘插到新电脑，先装好 DeepSeek Harness 并启动一次（为了内置 Node），$/, '  Plug the stick into the new machine, install DeepSeek Harness and start it once (to fetch its bundled Node),'],
+  [/^  退出应用后，双击 U 盘里的 dsh-migrate\.cmd 即可自动还原。$/, '  then quit it and double-click dsh-migrate.cmd on the stick.'],
+
+  // ---- restore
+  [/^还原计划$/, 'Restore plan'],
+  [/^  来源机器：(.+) 打包于 (.+)$/, '  From: $1, packed at $2'],
+  [/^--workspace-root 指定$/, 'set by --workspace-root'],
+  [/\[路径变更：--workspace-root 指定\]/, '[path change: set by --workspace-root]'],
+  [/\[路径变更：新机用户目录不同，自动迁移\]/, '[path change: user profile differs — re-rooted automatically]'],
+  [/^新机用户目录不同，自动迁移$/, 'the user profile differs — re-rooted automatically'],
+  [/^ 工作区：(.+)$/, ' Workspace: $1'],
+  [/^\(--dry-run，未做任何修改\)$/, '(--dry-run: nothing was written)'],
+  [/^目标已存在：(.+)$/, 'Target already exists: $1'],
+  [/^  加 --force 会先把它备份成 (.+)\.bak-<时间戳> 再覆盖$/, '  --force backs it up to $1.bak-<timestamp> first'],
+  [/^备份现有 home -> (.+)$/, 'Backing up the existing home -> $1'],
+  [/^复制 home$/, 'Copying the home'],
+  [/^保留本机 (.+) 失败：(.+)$/, 'Could not keep the local $1: $2'],
+  [/^  已保留本机状态：(.+)$/, '  Kept local state: $1'],
+  [/^  旧 home 备份仍留在此处：(.+)$/, '  Previous home backup left at: $1'],
+  [/^复制工作区$/, 'Copying workspaces'],
+  [/^包内缺少工作区：(.+)$/, 'Bundle is missing a workspace: $1'],
+  [/^插件数据目录$/, 'Plugin data directories'],
+  [/^修正插件 link: 路径$/, 'Rewriting plugin link: paths'],
+  [/^ (.+)\/package\.json 已更新$/, ' $1/package.json updated'],
+  [/^ storages\/workspace\.json 已更新$/, ' storages/workspace.json updated'],
+  [/^迁移会话目录$/, 'Migrating session directories'],
+  [/^未找到会话目录：(.+)$/, 'Session directory not found: $1'],
+  [/^目标会话目录已存在，跳过改名：(.+)$/, 'Target session directory already exists, not renaming: $1'],
+  [/^ 改写失败 (.+): (.+)$/, ' Rewrite failed for $1: $2'],
+  [/^ 会话头 cwd 改写：(\d+) 个$/, ' Session header cwd rewritten: $1'],
+  [/^修正 storages 内的绝对路径$/, 'Rewriting absolute paths inside storages'],
+  [/^ 已更新 (\d+) 处引用$/, ' Updated $1 reference(s)'],
+  [/^重装插件（node_modules 里是旧机器的绝对路径，必须重建）$/, "Reinstalling plugins (node_modules holds the old machine's absolute paths; it must be rebuilt)"],
+  [/^ 已删除 (.+)\/node_modules$/, ' Removed $1/node_modules'],
+  [/^已跳过插件安装（--no-install）。新机器上请执行：$/, 'Plugin install skipped (--no-install). Run this on the new machine:'],
+  [/^未找到 dsh 命令，无法自动安装插件。请手动执行：$/, 'The dsh command was not found, so plugins cannot be installed automatically. Run this manually:'],
+  [/^ (.+) 安装返回码 (\d+)，请检查输出$/, ' $1 install exited with code $2; check its output'],
+  [/^ 工作区：(.+)$/, ' Workspace: $1'],
+  [/^ 下一步：启动 DeepSeek Harness 并登录（凭证不随包迁移）。$/, ' Next: start DeepSeek Harness and sign in (credentials are not migrated).'],
+  [/^注意：本次还原到非默认 home，启动应用前需设置 DSH_HOME=(.+)$/, 'Note: restored into a non-default home; set DSH_HOME=$1 before starting the app'],
+
+  // ---- sync
+  [/^检测到中转站，开始双向同步$/, 'Relay detected — starting a two-way sync'],
+  [/^首次运行，初始化中转站（把本机完整推一份上去）$/, 'First run — seeding the relay with this machine'],
+  [/^首次同步：把这个中转站初始化成一份完整快照$/, 'First sync: initialising this relay with a full snapshot'],
+  [/^双向同步$/, 'Two-way sync'],
+  [/^工作区文件$/, 'Workspace files'],
+  [/^会话$/, 'Sessions'],
+  [/^工作区索引$/, 'Workspace index'],
+  [/^其它存储$/, 'Other storage'],
+  [/^附件与插件数据$/, 'Attachments and plugin data'],
+  [/^插件清单$/, 'Plugin manifests'],
+  [/^安装新增插件$/, 'Installing new plugins'],
+  [/^插件目录不完整（本次复制过 \.dsh 的典型后遗症），重新安装$/, 'Plugin directory is incomplete (typical after copying .dsh by hand) — reinstalling'],
+  [/^有新增插件但没找到 dsh 命令，请手动执行：(.+)$/, 'New plugins found but the dsh command is missing; run manually: $1'],
+  [/^ 工作区新增到本机：(.+)$/, ' Workspace added locally: $1'],
+  [/^ 工作区新增到中转站：(.+)$/, ' Workspace added to the relay: $1'],
+  [/^ 工作区按 --workspace-root 落到 (.+)（索引里原来是 (.+)）$/, ' Workspace placed at $1 by --workspace-root (the index had $2)'],
+  [/^ 会话（(.+)）：拉入 (\d+) \/ 推出 (\d+)$/, ' Sessions ($1): pulled $2 / pushed $3'],
+  // 汇总行必须排在通用 `(.+)：拉入…` 之前，否则 `会话` 会被当成标签原样留下。
+  [/^ 会话：拉入 (\d+) \/ 推出 (\d+)$/, ' Sessions: pulled $1 / pushed $2'],
+  [/^ 文件：拉入 (\d+) \/ 推出 (\d+) \/ 冲突 (\d+)$/, ' Files: pulled $1 / pushed $2 / conflicts $3'],
+  [/^ 中转站：(.+)$/, ' Relay: $1'],
+  [/^ 两边的 workspace\.json 已合并（工作区 id、会话列表取并集）$/, ' Both workspace.json files merged (workspace ids and session lists unioned)'],
+  [/^ 投影缓存 \/ 会话策略已按时间合并$/, ' Projection cache and session policy merged by timestamp'],
+  [/^ 插件目录：中转站里还没有，已整份推上去（不含 node_modules）$/, ' Plugin profiles: the relay had none, pushed a full copy (without node_modules)'],
+  [/^ 插件目录：本地没有，从包里整份复制（不含 node_modules）$/, ' Plugin profiles: none locally, copied the whole set from the relay (without node_modules)'],
+  [/^ (.+)：拉入 (\d+) 个文件 \/ 推出 (\d+) 个$/, ' $1: pulled $2 file(s) / pushed $3'],
+  [/^ (.+)：拉入 (\d+) \/ 推出 (\d+)$/, ' $1: pulled $2 / pushed $3'],
+  [/^ 插件 \+= (.+)（从包里补上）$/, ' Plugin += $1 (added from the relay)'],
+  [/^ 插件 \+= (.+)（推进包里）$/, ' Plugin += $1 (pushed to the relay)'],
+  [/^ 中转站里有插件数据（(.+)），本次没加 --with-plugin-data，已跳过$/, ' The relay holds plugin data ($1); --with-plugin-data was not passed, skipped'],
+  [/^ 中转站：(.+)$/, ' Relay: $1'],
+  [/^ 会话：拉入 (\d+) \/ 推出 (\d+)$/, ' Sessions: pulled $1 / pushed $2'],
+  [/^ 文件：拉入 (\d+) \/ 推出 (\d+) \/ 冲突 (\d+)$/, ' Files: pulled $1 / pushed $2 / conflicts $3'],
+  [/^  冲突文件已保留本地版本，另一份另存为 \.conflict-<时间戳>$/, '  Conflicting files kept their local version; the other copy was saved as .conflict-<timestamp>'],
+  [/^  冲突会话已按「最后写入时间新的赢」收敛，旧的一份另存为 \.conflict-<时间戳>$/, '  Conflicting sessions were resolved by last-write-wins; the older copy was saved as .conflict-<timestamp>'],
+  [/^  两台机器现在内容一致，可以直接换机继续。$/, '  Both machines now hold the same content — you can switch machines.'],
+  [/^ (.+) 两边都改过，采用本机那份（另一份另存 \.conflict-<时间戳>）$/, ' $1 was modified on both sides — keeping the local copy (the other saved as .conflict-<timestamp>)'],
+  [/^ (.+) 两边都改过，采用中转站那份（另一份另存 \.conflict-<时间戳>）$/, ' $1 was modified on both sides — keeping the relay copy (the other saved as .conflict-<timestamp>)'],
+  [/^ 两边都改过：(.+) —— 采用本机那份（另一份存为 (.+)\.conflict-<时间戳>）$/, ' Modified on both sides: $1 — keeping the local copy (the other saved as $2.conflict-<timestamp>)'],
+  [/^ 两边都改过：(.+) —— 采用中转站那份（另一份存为 (.+)\.conflict-<时间戳>）$/, ' Modified on both sides: $1 — keeping the relay copy (the other saved as $2.conflict-<timestamp>)'],
+  [/^ 同一会话两边都改了（(.+)）：采用本机那份，另一份另存为 \.conflict-<时间戳>$/, ' Session $1 was extended on both sides — keeping the local copy (the other saved as .conflict-<timestamp>)'],
+  [/^ 同一会话两边都改了（(.+)）：采用中转站那份，另一份另存为 \.conflict-<时间戳>$/, ' Session $1 was extended on both sides — keeping the relay copy (the other saved as .conflict-<timestamp>)'],
+
+  // ---- status
+  [/^DSH home：(.+)$/, 'DSH home: $1'],
+  [/^工作区（(\d+)）：$/, 'Workspaces ($1):'],
+  [/^    会话 (\d+) 个，目录 (.+)$/, '    $1 session(s), directory $2'],
+  [/^profile (.+)：(\d+) 个插件$/, 'profile $1: $2 plugin(s)'],
+];
+
+// 规则表里为了可读性保留了缩进（`^    请用 DSH ...`）。运行时统一去掉：
+// 模式吃掉的缩进、以及替换文本开头的缩进都由 tr() 按原行的缩进还原。
+// 只要出现中文或全角标点就要走翻译（`DSH home：…` 里只有一个全角冒号）。
+const CJK = /[\u3000-\u303f\u4e00-\u9fff\uff00-\uffef]/;
+
+const RULES = EN_RULES.map(([re, en]) => [
+  new RegExp(re.source.replace(/^\^ +/, '^'), re.flags),
+  en.replace(/^ +/, ''),
+]);
+
+/**
+ * 逐行翻译：先剥掉行首缩进，把规则作用在正文上，再把缩进拼回去。
+ * 一行里可能有多段中文（例如 `插件 profile：desktop(1 个 link 依赖)`），
+ * 所以每条命中的规则都替换一次，最多三轮直到不再变化。
+ */
+function tr(text) {
+  if (LANG === 'zh' || typeof text !== 'string' || !CJK.test(text)) return text;
+  return text
+    .split('\n')
+    .map((line) => {
+      const body0 = line.replace(/^[ \t]+/, '');
+      const indent = line.slice(0, line.length - body0.length);
+      if (!CJK.test(body0)) return line;
+      let body = body0;
+      for (let pass = 0; pass < 3; pass++) {
+        let changed = false;
+        for (const [re, en] of RULES) {
+          if (!re.test(body)) continue;
+          const next = body.replace(re, en);
+          if (next !== body) {
+            body = next;
+            changed = true;
+          }
+        }
+        if (!changed) break;
+      }
+      return indent + body;
+    })
+    .join('\n');
+}
+
+/* ------------------------------------------------------------------ utils */
+
+const log = (...a) => console.log(...a.map((x) => (typeof x === 'string' ? tr(x) : x)));
+const warn = (...a) => console.log('[!]', ...a.map((x) => (typeof x === 'string' ? tr(x) : x)));
+const step = (s) => console.log(`\n== ${tr(s)}`);
+
 /*
  * 会话日志首帧的改写依赖 zlib 的 Zstandard 接口（zstdCompressSync / zstdDecompressSync），
  * Node 22.15+ / 24 才带。老版本 Node 上不要冒险跑：没有它就只能「整文件重压」，
@@ -36,17 +254,13 @@ const CHECKSUM = { params: { [zlib.constants.ZSTD_c_checksumFlag]: 1 } };
  */
 if (typeof zlib.zstdCompressSync !== 'function' || typeof zlib.zstdDecompressSync !== 'function') {
   console.error(
-    `[x] 当前 Node 是 ${process.version}，没有内置 zstd 接口（需要 Node 22.15+ 或 24+）。\n` +
-      '    请用 DSH 自带的 Node 运行本工具：双击 dsh-migrate.cmd 即可（它会自动找）。',
+    tr(
+      `[x] 当前 Node 是 ${process.version}，没有内置 zstd 接口（需要 Node 22.15+ 或 24+）。\n` +
+        '    请用 DSH 自带的 Node 运行本工具：双击 dsh-migrate.cmd 即可（它会自动找）。',
+    ),
   );
   process.exit(2);
 }
-
-/* ------------------------------------------------------------------ utils */
-
-const log = (...a) => console.log(...a);
-const warn = (...a) => console.log('[!]', ...a);
-const step = (s) => console.log(`\n== ${s}`);
 
 function mb(n) {
   return `${(n / 1048576).toFixed(1)} MB`;
@@ -1837,6 +2051,84 @@ function cmdStatus(opts) {
   }
 }
 
+/* -------------------------------------------------------------------- help */
+
+const HELP_ZH = `dsh-migrate ${VERSION} — 在两台电脑之间接力使用 DeepSeek Harness
+
+  无参数（推荐，U 盘/共享盘模式）
+    把 dsh-migrate.cmd 和 dsh-migrate.mjs 放在 U 盘根目录：
+      任意一台机器双击 -> 双向同步（本地新的推上去，包里的新东西拉下来）
+      第一次双击会把当前机器完整推一份上去当底子。
+    两台机器轮流各双击一次，内容就接上了，谁都不用重新装、不用重新登录。
+
+  命令行
+  node dsh-migrate.mjs sync    --with <中转目录> [--home <DSH_HOME>] [--with-plugin-data [目录名,...]] [--no-install] [--dry-run]
+  node dsh-migrate.mjs pack    --out <目录>   [--home <DSH_HOME>] [--with-credentials] [--with-git] [--with-plugin-data [目录名,...]] [--force]
+  node dsh-migrate.mjs restore --in  <目录>   [--home <DSH_HOME>] [--workspace-root <目录>] [--no-install] [--force] [--dry-run]
+  node dsh-migrate.mjs status                 [--home <DSH_HOME>]
+  node dsh-migrate.mjs --version | --help
+
+  选项
+  --lang zh|en        输出语言（默认跟随系统区域；也可用 DSH_MIGRATE_LANG 指定）
+
+说明：
+  * 运行前请**完全退出** DeepSeek Harness（关窗口不算，从托盘退出）。
+    工具会检测应用是否还占用着数据目录，没退出就拒绝执行；确实要跑加 --force。
+  * sync 是并集合并：两边各自新增的会话、工作区文件、插件都会保留；
+    同一份文件/会话两边都改过时，按「后写的赢」收敛，另一份另存 .conflict-<时间戳> 留档，只留在本机、不再来回同步。
+  * pack/restore 是单向快照：换新机器、或想回到某个确定状态时用。
+  * 同步范围是「发现式」的：DSH home 下的会话、存储、插件清单，加上工作区目录里的全部文件，
+    以及 DSH home 里其它顶层目录（插件自己建的数据目录，装了什么插件就带什么，不需要预先知道）。
+    始终跳过 node_modules、dsh-runtimes、cache、logs；.credentials.yaml 不搬（每台机器各自登录一次）。
+  * 在别的文件夹里开过的会话（不在工作区索引里的项目目录）也会一并搬过去，不会丢。
+  * 插件数据目录在用户目录下（~/.openviking、~/.hindsight）：默认不搬，需要时加 --with-plugin-data；
+    你的插件把数据放在别处，就用 --with-plugin-data 目录名（相对 ~）或 --with-plugin-data D:\\某个目录 显式指定。
+  * 两台机器用户名不同也没关系：同步时按本机用户目录自动换算工作区路径，
+    会话头 cwd、workspace.json、link: 依赖都会跟着改。
+`;
+
+const HELP_EN = `dsh-migrate ${VERSION} — move DeepSeek Harness between two computers
+
+  No arguments (recommended, USB stick / shared folder)
+    Put dsh-migrate.cmd and dsh-migrate.mjs at the root of the stick:
+      double-click on either machine -> two-way sync (local news go up, relay news come down)
+      the first double-click seeds the relay with a full copy of that machine.
+    Alternate one double-click per machine and the two stay in step — no reinstall, no re-login.
+
+  Command line
+  node dsh-migrate.mjs sync    --with <relay-dir> [--home <DSH_HOME>] [--with-plugin-data [dir,...]] [--no-install] [--dry-run]
+  node dsh-migrate.mjs pack    --out <dir>        [--home <DSH_HOME>] [--with-credentials] [--with-git] [--with-plugin-data [dir,...]] [--force]
+  node dsh-migrate.mjs restore --in <dir>         [--home <DSH_HOME>] [--workspace-root <dir>] [--no-install] [--force] [--dry-run]
+  node dsh-migrate.mjs status                     [--home <DSH_HOME>]
+  node dsh-migrate.mjs --version | --help
+
+  Options
+  --lang zh|en        Output language (defaults to the system locale; DSH_MIGRATE_LANG also works)
+
+Notes:
+  * Quit DeepSeek Harness **completely** before running (closing the window is not enough; exit from
+    the tray icon). The tool detects a locked data directory and refuses; add --force to override.
+  * sync is a union merge: sessions, workspace files and plugins added on either side are kept.
+    When the same file or session changed on both machines, the later write wins and the other copy is
+    saved as .conflict-<timestamp> — it stays on that machine and is not synced again.
+  * pack/restore are one-way snapshots: for a brand-new machine, or to return to a known state.
+  * The sync scope is discovered, not hard-coded: every session, storage file and plugin manifest under
+    the DSH home, every file in the workspace, plus any other top-level directory in the DSH home
+    (a plugin's own data directory travels with the plugin, without this tool knowing about it).
+    node_modules, dsh-runtimes, cache and logs are always skipped; .credentials.yaml never moves
+    (sign in once per machine).
+  * Sessions opened in other folders (project directories outside the workspace index) travel too.
+  * Plugin data directories live in your user profile (~/.openviking, ~/.hindsight): not synced by
+    default — add --with-plugin-data. If your plugin keeps data elsewhere, name it:
+    --with-plugin-data somedir (relative to ~) or --with-plugin-data D:\\some\\dir.
+  * Different user names on the two machines are fine: workspace paths are re-rooted to the local
+    profile and session header cwd, workspace.json and link: dependencies are rewritten to match.
+`;
+
+function helpText() {
+  return LANG === 'en' ? HELP_EN : HELP_ZH;
+}
+
 /* -------------------------------------------------------------------- main */
 
 function parseArgs(argv) {
@@ -1888,35 +2180,6 @@ else if (cmd === 'restore') cmdRestore(argv);
 else if (cmd === 'sync') cmdSync(argv);
 else if (cmd === 'status') cmdStatus(argv);
 else {
-  log(`dsh-migrate — 在两台电脑之间接力使用 DeepSeek Harness
-
-  无参数（推荐，U 盘/共享盘模式）
-    把 dsh-migrate.cmd 和 dsh-migrate.mjs 放在 U 盘根目录：
-      任意一台机器双击 -> 双向同步（本地新的推上去，包里的新东西拉下来）
-      第一次双击会把当前机器完整推一份上去当底子。
-    两台机器轮流各双击一次，内容就接上了，谁都不用重新装、不用重新登录。
-
-  命令行
-  node dsh-migrate.mjs sync    --with <中转目录> [--home <DSH_HOME>] [--with-plugin-data [目录名,...]] [--no-install] [--dry-run]
-  node dsh-migrate.mjs pack    --out <目录>   [--home <DSH_HOME>] [--with-credentials] [--with-git] [--with-plugin-data [目录名,...]] [--force]
-  node dsh-migrate.mjs restore --in  <目录>   [--home <DSH_HOME>] [--workspace-root <目录>] [--no-install] [--force] [--dry-run]
-  node dsh-migrate.mjs status                 [--home <DSH_HOME>]
-  node dsh-migrate.mjs --version
-
-说明：
-  * 运行前请**完全退出** DeepSeek Harness（关窗口不算，从托盘退出）。
-    工具会检测应用是否还占用着数据目录，没退出就拒绝执行；确实要跑加 --force。
-  * sync 是并集合并：两边各自新增的会话、工作区文件、插件都会保留；
-    同一份文件/会话两边都改过时，按「后写的赢」收敛，另一份另存 .conflict-<时间戳> 留档，只留在本机、不再来回同步。
-  * pack/restore 是单向快照：换新机器、或想回到某个确定状态时用。
-  * 同步范围是「发现式」的：DSH home 下的会话、存储、插件清单，加上工作区目录里的全部文件，
-    以及 DSH home 里其它顶层目录（插件自己建的数据目录，装了什么插件就带什么，不需要我预先知道）。
-    始终跳过 node_modules、dsh-runtimes、cache、logs；.credentials.yaml 不搬（每台机器各自登录一次）。
-  * 在别的文件夹里开过的会话（不在工作区索引里的项目目录）也会一并搬过去，不会丢。
-  * 插件数据目录在用户目录下（~/.openviking、~/.hindsight）：默认不搬，需要时加 --with-plugin-data；
-    你的插件把数据放在别处，就用 --with-plugin-data 目录名（相对 ~）或 --with-plugin-data D:\某个目录 显式指定。
-  * 两台机器用户名不同也没关系：同步时按本机用户目录自动换算工作区路径，
-    会话头 cwd、workspace.json、link: 依赖都会跟着改。
-`);
+  log(helpText());
   process.exit(cmd === 'help' ? 0 : 1);
 }

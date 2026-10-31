@@ -4,6 +4,16 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project follows
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- Bilingual output: `--help`, `--version` and every progress/error message render in
+  Chinese or English. `--lang zh|en` overrides, `DSH_MIGRATE_LANG` does the same, and
+  the default follows the system locale. Paths, session titles and user file names are
+  never translated. The smoke test asserts that an English run leaves no untranslated
+  line behind.
+
 ## [1.0.0] — 2026-10-31
 
 First public release.

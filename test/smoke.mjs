@@ -41,7 +41,21 @@ function run(...args) {
   return { status: r.status, stdout: r.stdout || '', stderr: r.stderr || '' };
 }
 
+function runEnv(env, ...args) {
+  const r = spawnSync(process.execPath, [CLI, ...args], { encoding: 'utf8', env: { ...process.env, ...env } });
+  if (r.status !== 0) {
+    console.log(`--- command failed: ${args.join(' ')}`);
+    console.log(r.stdout || '');
+    console.log(r.stderr || '');
+  }
+  return { status: r.status, stdout: r.stdout || '', stderr: r.stderr || '' };
+}
+
+// 中文或全角标点都算「还没翻译干净」。
+const CJK = /[\u3000-\u303f\u4e00-\u9fff\uff00-\uffef]/;
+
 // ---- fixture helpers -------------------------------------------------------
+
 
 function projectKey(cwd) {
   // Mirrors the tool's own derivation; used only to place fixtures.
@@ -252,6 +266,22 @@ try {
   r = run('sync', '--with', relay, '--home', B.home, '--workspace-root', path.dirname(B.ws), '--no-install', '--dry-run', '--force');
   check(r.status === 0, 'dry run exits 0', r.stderr);
   check(fs.statSync(path.join(B.home, 'storages', 'workspace.json')).mtimeMs === before, 'dry run left files untouched');
+  console.log('\n[8] output language');
+  let en = run('--help', '--lang', 'en');
+  check(en.status === 0, '--help --lang en exits 0');
+  check(!CJK.test(en.stdout), 'help text is fully English', en.stdout.match(/.*[\u4e00-\u9fff].*/)?.[0]);
+  check(/move DeepSeek Harness/.test(en.stdout), 'help text is the English variant');
+
+  en = run('sync', '--with', relay, '--home', B.home, '--workspace-root', path.dirname(B.ws), '--no-install', '--dry-run', '--force', '--lang', 'en');
+  check(en.status === 0, 'sync --lang en exits 0', en.stderr);
+  check(!CJK.test(en.stdout), 'sync progress messages are fully English', en.stdout.match(/.*[\u4e00-\u9fff].*/)?.[0]);
+  check(/Sessions/.test(en.stdout) && /Files: pulled/.test(en.stdout), 'English summary lines render');
+
+  en = runEnv({ DSH_MIGRATE_LANG: 'en' }, 'status', '--home', B.home);
+  check(!CJK.test(en.stdout), 'DSH_MIGRATE_LANG=en is honoured', en.stdout.match(/.*[\u4e00-\u9fff].*/)?.[0]);
+
+  en = runEnv({ DSH_MIGRATE_LANG: 'zh' }, '--help');
+  check(CJK.test(en.stdout), 'DSH_MIGRATE_LANG=zh keeps Chinese output');
 } finally {
   fs.rmSync(root, { recursive: true, force: true });
 }
