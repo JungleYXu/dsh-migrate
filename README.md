@@ -7,6 +7,8 @@ Move **DeepSeek Harness** between two computers — conversations, plugins, plug
 > **Windows only** (10/11). It relies on `cmd.exe`, NTFS junctions and the Windows Electron build.
 >
 > [中文说明](README.zh-CN.md) · Tool output is in Chinese; the source is commented in Chinese.
+>
+> **Background reading:** [DSH Discussions #11665](https://github.com/deepseek-ai/deepseek-harness/discussions/11665) — what hand-copying `~/.dsh` loses, and the on-disk format details this tool depends on.
 
 ---
 

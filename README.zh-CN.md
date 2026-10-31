@@ -7,6 +7,8 @@
 > **仅支持 Windows 10/11**（依赖 `cmd.exe`、NTFS junction 和 Windows 版 Electron）。
 >
 > [English README](README.md)
+>
+> **背景讨论：** [DSH 讨论区 #11665](https://github.com/deepseek-ai/deepseek-harness/discussions/11665)——手工拷 `~/.dsh` 会漏什么，以及本工具依赖的几个磁盘格式细节。
 
 ---
 
