@@ -1,0 +1,37 @@
+{
+  "name": "dsh-migrate",
+  "version": "1.0.0",
+  "description": "Move DeepSeek Harness between two computers: conversations, plugins, plugin settings and workspace files, merged instead of overwritten.",
+  "type": "module",
+  "bin": {
+    "dsh-migrate": "./dsh-migrate.mjs"
+  },
+  "files": [
+    "dsh-migrate.mjs",
+    "dsh-migrate.cmd",
+    "README.md",
+    "README.zh-CN.md",
+    "LICENSE",
+    "CHANGELOG.md",
+    "docs/"
+  ],
+  "engines": {
+    "node": ">=22.15"
+  },
+  "scripts": {
+    "test": "node test/smoke.mjs"
+  },
+  "keywords": [
+    "deepseek-harness",
+    "dsh",
+    "migration",
+    "sync",
+    "backup",
+    "windows"
+  ],
+  "license": "MIT",
+  "os": [
+    "win32"
+  ],
+  "private": false
+}

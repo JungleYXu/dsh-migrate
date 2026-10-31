@@ -1,0 +1,18 @@
+# dependencies
+node_modules/
+pnpm-lock.yaml
+
+# test output / scratch state
+.dsh-test/
+*.tmp
+*.log
+
+# OS noise
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# editors
+.vscode/
+.idea/
+*.swp
