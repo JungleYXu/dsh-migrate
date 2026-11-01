@@ -308,7 +308,21 @@ function isInside(child, parent) {
 
 function samePath(a, b) {
   if (!a || !b) return false;
-  return path.resolve(a).toLowerCase() === path.resolve(b).toLowerCase();
+  if (path.resolve(a).toLowerCase() === path.resolve(b).toLowerCase()) return true;
+  // Windows 会给同一目录两个名字：8.3 短名（C:\Users\RUNNER~1\…）和长名
+  // （C:\Users\runneradmin\…）。CI 机器的 TEMP 就是短名，若这里判不等，
+  // 每轮同步都会把会话头 cwd 重写一遍，两台机器永远收敛不了。
+  const real = (p) => {
+    try {
+      return fs.realpathSync.native ? fs.realpathSync.native(p) : fs.realpathSync(p);
+    } catch {
+      return null;
+    }
+  };
+  const ra = real(a);
+  const rb = real(b);
+  if (ra && rb) return ra.toLowerCase() === rb.toLowerCase();
+  return false;
 }
 
 function walkSize(dir) {
@@ -465,10 +479,11 @@ function rewriteLogCwd(file, oldCwd, newCwd) {
     throw new Error('首行不是合法 JSON');
   }
   if (obj.type !== 'session') throw new Error('首行不是 session 头');
-  if (obj.cwd !== oldCwd) {
-    if (obj.cwd !== newCwd) return false;
-    return false;
-  }
+  // 用路径判等（含 Windows 8.3 短名），不要用字符串相等：
+  // CI 机器的 TEMP 是 C:\Users\RUNNER~1\…，索引里存的常是长名 runneradmin，
+  // 两者指同一目录，字符串比会误判成「不是这个工作区的会话」而跳过改写。
+  if (!samePath(obj.cwd, oldCwd)) return false;
+  if (samePath(obj.cwd, newCwd)) return false;
   obj.cwd = newCwd;
   const newLine = JSON.stringify(obj) + '\n';
 

@@ -31,8 +31,12 @@ function check(ok, label, detail) {
   }
 }
 
+// 断言匹配的是中文文案，所以显式钉住输出语言：CI 机器的 locale 是 en，
+// 不钉住的话同一句汇总行会变成英文，中文正则永远匹配不上。
+const BASE_ENV = { ...process.env, DSH_MIGRATE_LANG: 'zh' };
+
 function run(...args) {
-  const r = spawnSync(process.execPath, [CLI, ...args], { encoding: 'utf8' });
+  const r = spawnSync(process.execPath, [CLI, ...args], { encoding: 'utf8', env: BASE_ENV });
   if (r.status !== 0) {
     console.log(`--- command failed: ${args.join(' ')}`);
     console.log(r.stdout || '');
@@ -42,7 +46,7 @@ function run(...args) {
 }
 
 function runEnv(env, ...args) {
-  const r = spawnSync(process.execPath, [CLI, ...args], { encoding: 'utf8', env: { ...process.env, ...env } });
+  const r = spawnSync(process.execPath, [CLI, ...args], { encoding: 'utf8', env: { ...BASE_ENV, ...env } });
   if (r.status !== 0) {
     console.log(`--- command failed: ${args.join(' ')}`);
     console.log(r.stdout || '');
