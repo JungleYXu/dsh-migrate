@@ -306,23 +306,38 @@ function isInside(child, parent) {
   return a === b || a.startsWith(b.endsWith(path.sep) ? b : b + path.sep);
 }
 
+/**
+ * 把路径规整成「长名 + 绝对」形式，用于比较。
+ * Windows 会给同一目录两个名字（8.3 短名 C:\Users\RUNNER~1\… 与长名
+ * C:\Users\runneradmin\…），CI 机器的 TEMP 就是短名；只比字符串会把它们当成
+ * 两个目录，导致会话头 cwd 每轮都被重写。
+ * 叶子可能还不存在（同步时目标目录尚未建），所以从最深的已存在祖先取 realpath，
+ * 再把剩下的相对段拼回去。
+ */
+function canonPath(p) {
+  let cur = path.resolve(p);
+  const rest = [];
+  for (;;) {
+    try {
+      const real = fs.realpathSync.native ? fs.realpathSync.native(cur) : fs.realpathSync(cur);
+      return rest.length ? path.join(real, ...rest) : real;
+    } catch {
+      const parent = path.dirname(cur);
+      if (parent === cur) return path.resolve(p);
+      rest.unshift(path.basename(cur));
+      cur = parent;
+    }
+  }
+}
+
 function samePath(a, b) {
   if (!a || !b) return false;
   if (path.resolve(a).toLowerCase() === path.resolve(b).toLowerCase()) return true;
-  // Windows 会给同一目录两个名字：8.3 短名（C:\Users\RUNNER~1\…）和长名
-  // （C:\Users\runneradmin\…）。CI 机器的 TEMP 就是短名，若这里判不等，
-  // 每轮同步都会把会话头 cwd 重写一遍，两台机器永远收敛不了。
-  const real = (p) => {
-    try {
-      return fs.realpathSync.native ? fs.realpathSync.native(p) : fs.realpathSync(p);
-    } catch {
-      return null;
-    }
-  };
-  const ra = real(a);
-  const rb = real(b);
-  if (ra && rb) return ra.toLowerCase() === rb.toLowerCase();
-  return false;
+  try {
+    return canonPath(a).toLowerCase() === canonPath(b).toLowerCase();
+  } catch {
+    return false;
+  }
 }
 
 function walkSize(dir) {

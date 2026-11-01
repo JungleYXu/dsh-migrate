@@ -31,6 +31,27 @@ function check(ok, label, detail) {
   }
 }
 
+/**
+ * 「是不是同一个目录」——不能直接比字符串：Windows 上同一目录有 8.3 短名
+ * （C:\Users\RUNNER~1\…）和长名两种写法，CI 机器的 TEMP 就是短名。
+ */
+function canon(p) {
+  let cur = path.resolve(p);
+  const rest = [];
+  for (;;) {
+    try {
+      const real = fs.realpathSync.native ? fs.realpathSync.native(cur) : fs.realpathSync(cur);
+      return (rest.length ? path.join(real, ...rest) : real).toLowerCase();
+    } catch {
+      const parent = path.dirname(cur);
+      if (parent === cur) return path.resolve(p).toLowerCase();
+      rest.unshift(path.basename(cur));
+      cur = parent;
+    }
+  }
+}
+const sameDir = (a, b) => !!a && !!b && canon(a) === canon(b);
+
 // 断言匹配的是中文文案，所以显式钉住输出语言：CI 机器的 locale 是 en，
 // 不钉住的话同一句汇总行会变成英文，中文正则永远匹配不上。
 const BASE_ENV = { ...process.env, DSH_MIGRATE_LANG: 'zh' };
@@ -211,7 +232,7 @@ try {
   const cHome = path.join(C.root, 'home');
   check(sessionIds(cHome).has('session-main-A'), 'restored session present');
   const hdr = readHeader(cHome, 'session-main-A');
-  check(hdr && hdr.cwd === cws, 'session cwd rewritten to the new workspace', hdr && hdr.cwd);
+  check(sameDir(hdr && hdr.cwd, cws), 'session cwd rewritten to the new workspace', `got ${hdr && hdr.cwd} / want ${cws}`);
   check(exists(cws, 'README.md'), 'workspace files restored');
   const idx = JSON.parse(fs.readFileSync(path.join(cHome, 'storages', 'workspace.json'), 'utf8'));
   const wid = Object.keys(idx.tables.workspaces)[0];
@@ -229,7 +250,7 @@ try {
   const idsB = sessionIds(B.home);
   check(idsB.has('session-main-A') && idsB.has('session-main-B'), 'both main sessions present on B');
   check(idsB.has('session-stray-A') && idsB.has('session-stray-B'), 'sessions from outside the workspace index carried over');
-  check(readHeader(B.home, 'session-main-A').cwd === B.ws, 'pulled session cwd rewritten on B', readHeader(B.home, 'session-main-A').cwd);
+  check(sameDir(readHeader(B.home, 'session-main-A').cwd, B.ws), 'pulled session cwd rewritten on B', readHeader(B.home, 'session-main-A').cwd);
   check(exists(B.home, 'made-up-plugin', 'state.json'), 'unknown plugin dir pulled to B');
   check(
     fs.readFileSync(path.join(B.home, 'made-up-plugin', 'state.json'), 'utf8') ===
@@ -245,7 +266,7 @@ try {
   run('sync', '--with', relay, '--home', A.home, '--workspace-root', path.dirname(A.ws), '--no-install', '--force');
   const finalA = sessionIds(A.home);
   check(finalA.has('session-main-B') && finalA.has('session-stray-B'), 'A pulled B\'s sessions');
-  check(readHeader(A.home, 'session-main-B').cwd === A.ws, 'cwd rewritten back on A');
+  check(sameDir(readHeader(A.home, 'session-main-B').cwd, A.ws), 'cwd rewritten back on A', readHeader(A.home, 'session-main-B').cwd);
   check(
     fs.readFileSync(path.join(A.home, 'made-up-plugin', 'state.json'), 'utf8') ===
       fs.readFileSync(path.join(B.home, 'made-up-plugin', 'state.json'), 'utf8'),
@@ -390,7 +411,7 @@ try {
     r = syncB();
     check(r.status === 0, 'the other machine pulls that log without crashing', r.stderr);
     const pulled = readHeader(B.home, id);
-    check(pulled && pulled.cwd === B.ws, 'pulled merged-frame log keeps a readable header with rewritten cwd', pulled && pulled.cwd);
+    check(sameDir(pulled && pulled.cwd, B.ws), 'pulled merged-frame log keeps a readable header with rewritten cwd', pulled && pulled.cwd);
   }
 } finally {
   fs.rmSync(root, { recursive: true, force: true });
