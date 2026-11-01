@@ -16,4 +16,14 @@ jobs:
       - name: Syntax check
         run: node --check dsh-migrate.mjs
       - name: Smoke test
-        run: node test/smoke.mjs
+        run: node test/smoke.mjs 2>&1 | Tee-Object -FilePath smoke.log
+      # 失败时把日志尾部提升为 annotation，这样在无法下载原始日志的环境里也能看到原因。
+      - name: Report failure
+        if: failure()
+        run: |
+          node --version
+          if (Test-Path smoke.log) {
+            Get-Content smoke.log -Tail 40 | ForEach-Object { "::error::$_" }
+          } else {
+            "::error::smoke.log was not produced"
+          }
