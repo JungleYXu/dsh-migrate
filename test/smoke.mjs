@@ -235,7 +235,7 @@ try {
   check(
     sameDir(hdr && hdr.cwd, cws),
     'session cwd rewritten to the new workspace',
-    `got ${hdr && hdr.cwd} / want ${cws} / restore said: ${r.stdout.split('\n').slice(0, 10).join(' | ')}`,
+    `got ${hdr && hdr.cwd} / want ${cws} / restore said: ${r.stdout.split('\n').slice(0, 40).join(' | ')}`,
   );
   check(exists(cws, 'README.md'), 'workspace files restored');
   const idx = JSON.parse(fs.readFileSync(path.join(cHome, 'storages', 'workspace.json'), 'utf8'));
