@@ -17,13 +17,16 @@ jobs:
         run: node --check dsh-migrate.mjs
       - name: Smoke test
         run: node test/smoke.mjs 2>&1 | Tee-Object -FilePath smoke.log
-      # 失败时把日志尾部提升为 annotation，这样在无法下载原始日志的环境里也能看到原因。
+      # 失败时把日志尾部提升为一条 annotation（GitHub 每步最多显示 10 条，所以必须合并成一条），
+      # 这样在无法下载原始日志的环境里也能看到原因。
       - name: Report failure
         if: failure()
         run: |
           node --version
           if (Test-Path smoke.log) {
-            Get-Content smoke.log -Tail 40 | ForEach-Object { "::error::$_" }
+            $tail = (Get-Content smoke.log -Tail 45) -join ' | '
+            $tail = $tail.Replace('%', '%25').Replace("`r", '').Replace("`n", ' ')
+            "::error::SMOKE TAIL: $tail"
           } else {
             "::error::smoke.log was not produced"
           }
