@@ -470,26 +470,13 @@ function firstFrameLength(buf) {
 /** 把会话日志第一行（header）里的 cwd 换成新值。返回 true 表示改写成功。 */
 function rewriteLogCwd(file, oldCwd, newCwd) {
   const buf = fs.readFileSync(file);
-  const isZstd = buf.length >= 8 && buf.readUInt32LE(0) === ZSTD_MAGIC;
+  // 首帧的切法必须和同步路径一致：某些 Node 版本会把「首帧 + 下一帧」一起解出来，
+  // 自己再按 firstFrameLength 解一次会拿到两行，JSON.parse 直接炸（CI 上就是这样）。
+  const parts = splitLog(buf);
 
-  let headText;
-  let tail;
-  if (isZstd) {
-    const frameLen = firstFrameLength(buf);
-    if (frameLen < 0) throw new Error('无法定位首个 zstd 帧');
-    headText = zlib.zstdDecompressSync(buf.subarray(0, frameLen)).toString('utf8');
-    tail = buf.subarray(frameLen);
-  } else {
-    const nl = buf.indexOf(0x0a);
-    if (nl < 0) throw new Error('日志缺少首行');
-    headText = buf.subarray(0, nl + 1).toString('utf8');
-    tail = buf.subarray(nl + 1);
-  }
-
-  const line = headText.replace(/\n$/, '');
   let obj;
   try {
-    obj = JSON.parse(line);
+    obj = JSON.parse(parts.headText.replace(/\n$/, ''));
   } catch {
     throw new Error('首行不是合法 JSON');
   }
@@ -499,21 +486,9 @@ function rewriteLogCwd(file, oldCwd, newCwd) {
   // 两者指同一目录，字符串比会误判成「不是这个工作区的会话」而跳过改写。
   if (!samePath(obj.cwd, oldCwd)) return false;
   if (samePath(obj.cwd, newCwd)) return false;
-  obj.cwd = newCwd;
-  const newLine = JSON.stringify(obj) + '\n';
-
-  let head;
-  if (isZstd) {
-    head = zlib.zstdCompressSync(Buffer.from(newLine, 'utf8'), CHECKSUM);
-    // 自检：重编后的第一帧必须能独立解出同一行
-    const check = zlib.zstdDecompressSync(head).toString('utf8');
-    if (check !== newLine) throw new Error('重编首帧自检失败');
-  } else {
-    head = Buffer.from(newLine, 'utf8');
-  }
 
   const tmp = `${file}.migrate-tmp`;
-  fs.writeFileSync(tmp, Buffer.concat([head, tail]));
+  fs.writeFileSync(tmp, joinLog(parts, newCwd));
   fs.renameSync(tmp, file);
   return true;
 }
