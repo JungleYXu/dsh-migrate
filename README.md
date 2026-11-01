@@ -69,8 +69,29 @@ Every command also accepts `--lang zh|en`.
 | `--no-install` | Skip `dsh plugin install` (dry runs, CI, or when you want to install by hand). |
 | `--no-delete` | Do not propagate deletions; keep the merge union-only. |
 | `--no-backup` | Skip the pre-write backup for this run (on by default, see below). |
+| `--skip-workspace <path\|name>` | Leave this workspace out of sync. Repeatable, or comma-separated. Use it for game folders and asset libraries that happen to be open as a DSH workspace. |
 | `--dry-run` | Print what would change, write nothing. Start here. |
 | `--force` | Run even if DSH appears to be running; also allows overwriting an existing bundle. |
+
+## A config file next to the script
+
+Everything you would put on the command line can also live in `dsh-migrate.config.json`, next to
+`dsh-migrate.mjs` (or at `~/.dsh/.dsh-migrate.config.json`):
+
+```json
+{
+  "skipWorkspace": ["D:\\Games\\Need for Speed"],
+  "withPluginData": ".openviking,.hindsight",
+  "noDelete": false
+}
+```
+
+Keys are the camelCase form of the flags (`skipWorkspace`, `withPluginData`, `workspaceRoot`,
+`noInstall`, `noDelete`, `noBackup`, …). Explicit command-line flags win over the file;
+`skipWorkspace` from both sources is merged. `--lang` is deliberately not part of the file: it
+changes how the run reports itself, so it belongs on the command line (or in
+`DSH_MIGRATE_LANG`). The config file exists mainly because the `.cmd` launcher has to stay plain
+ASCII — a Chinese or otherwise non-ASCII path cannot be passed through it, but it can sit here.
 
 ## What gets synced
 

@@ -24,7 +24,7 @@ import zlib from 'node:zlib';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 
-const VERSION = '1.1.0';
+const VERSION = '1.1.1';
 const FORMAT = 'dsh-migrate/1';
 const ZSTD_MAGIC = 0xfd2fb528;
 const CHECKSUM = { params: { [zlib.constants.ZSTD_c_checksumFlag]: 1 } };
@@ -180,6 +180,7 @@ const EN_RULES = [
   [/^ 插件 \+= (.+)（从包里补上）$/, ' Plugin += $1 (added from the relay)'],
   [/^ 插件 \+= (.+)（推进包里）$/, ' Plugin += $1 (pushed to the relay)'],
   [/^ 中转站里有插件数据（(.+)），本次没加 --with-plugin-data，已跳过$/, ' The relay holds plugin data ($1); --with-plugin-data was not passed, skipped'],
+  [/^按 --skip-workspace 跳过工作区：(.+)$/, ' Skipped workspace by --skip-workspace: $1'],
   [/^ 中转站：(.+)$/, ' Relay: $1'],
   [/^ 会话：拉入 (\d+) \/ 推出 (\d+)$/, ' Sessions: pulled $1 / pushed $2'],
   [/^ 文件：拉入 (\d+) \/ 推出 (\d+) \/ 冲突 (\d+)$/, ' Files: pulled $1 / pushed $2 / conflicts $3'],
@@ -541,6 +542,30 @@ function linkDeps(profileDir) {
 
 /* -------------------------------------------------------------------- pack */
 
+/**
+ * --skip-workspace 的匹配器。
+ * 可以给绝对路径（精确匹配，大小写不敏感），也可以只给目录名（末段匹配），
+ * 可重复给多次，或用逗号分隔。
+ */
+function skipWorkspaceMatcher(opts) {
+  const raw = opts.skipWorkspace;
+  if (!raw || raw === true) return () => false;
+  const items = [].concat(raw).flatMap((v) => String(v).split(',')).map((s) => s.trim()).filter(Boolean);
+  if (!items.length) return () => false;
+  const paths = [];
+  const names = [];
+  for (const it of items) {
+    if (/^[a-zA-Z]:[\\/]/.test(it) || it.startsWith('\\\\') || it.startsWith('/')) paths.push(path.resolve(it).toLowerCase());
+    else names.push(it.toLowerCase().replace(/[\\/]+$/, ''));
+  }
+  return (p) => {
+    const abs = path.resolve(p).toLowerCase().replace(/[\\/]+$/, '');
+    if (paths.includes(abs)) return true;
+    const base = path.basename(abs);
+    return names.some((n) => n.includes('\\') || n.includes('/') ? abs.endsWith(n) : base === n);
+  };
+}
+
 function cmdPack(opts) {
   const home = opts.home || defaultHome();
   assertAppClosed(opts);
@@ -592,7 +617,13 @@ function cmdPack(opts) {
 
   const index = readWorkspaceIndex(home);
   const wsEntries = [];
-  const list = index.ids.map((id) => ({ id, ...index.workspaces[id] }));
+  const skipWs = skipWorkspaceMatcher(opts);
+  const all = index.ids.map((id) => ({ id, ...index.workspaces[id] }));
+  const list = all.filter((ws) => {
+    if (!skipWs(ws.path)) return true;
+    warn(`按 --skip-workspace 跳过工作区：${ws.path}`);
+    return false;
+  });
 
   step(`打包工作区（${list.length} 个）`);
   list.forEach((ws, i) => {
@@ -2227,6 +2258,18 @@ function cmdSync(opts) {
 
   step(firstRun ? '首次同步：把这个中转站初始化成一份完整快照' : '双向同步');
   const { mapping, idx } = resolveSyncMapping(home, mf, opts);
+
+  // 某些工作区可能大到不该跟着同步（游戏目录、素材库、几百 GB 的工程），
+  // 用 --skip-workspace <路径或目录名> 把它们排除在本次同步之外。
+  const skipWs = skipWorkspaceMatcher(opts);
+  for (let i = mapping.length - 1; i >= 0; i--) {
+    const m = mapping[i];
+    if (skipWs(m.localPath) || skipWs(m.bundlePath)) {
+      warn(`按 --skip-workspace 跳过工作区：${m.localPath}`);
+      mapping.splice(i, 1);
+    }
+  }
+
   for (const m of mapping) {
     if (m.isNewLocal) log(`  工作区新增到本机：${m.localPath}`);
     if (m.isNewBundle) log(`  工作区新增到中转站：${m.bundlePath}`);
@@ -2489,6 +2532,7 @@ function cmdStatus(opts) {
   }
   const index = readWorkspaceIndex(home);
   log(`DSH home：${home}   (${mb(walkSize(home))})`);
+  if (cfgFile) log(`配置文件：${cfgFile}`);
   log(`\n工作区（${index.ids.length}）：`);
   for (const id of index.ids) {
     const ws = index.workspaces[id];
@@ -2528,6 +2572,8 @@ const HELP_ZH = `dsh-migrate ${VERSION} — 在两台电脑之间接力使用 De
   --lang zh|en        输出语言（默认跟随系统区域；也可用 DSH_MIGRATE_LANG 指定）
   --no-delete         sync 只合并、不传播删除（默认会把「本机删掉的文件」同步删掉对面那份）
   --no-backup         sync 不做写前备份（默认会把即将被改动的本机文件先存一份）
+  --skip-workspace <路径|目录名>
+                      不同步这个工作区，可重复给多次；用来排除游戏目录、素材库这类大而无用的目录
 
 说明：
   * 运行前请**完全退出** DeepSeek Harness（关窗口不算，从托盘退出）。
@@ -2572,6 +2618,8 @@ const HELP_EN = `dsh-migrate ${VERSION} — move DeepSeek Harness between two co
   --lang zh|en        Output language (defaults to the system locale; DSH_MIGRATE_LANG also works)
   --no-delete         sync merges only; do not propagate deletions to the other machine
   --no-backup         sync without the pre-write backup (on by default)
+  --skip-workspace <path|name>
+                      leave this workspace out of sync; repeatable (game folders, asset libraries)
 
 Notes:
   * Quit DeepSeek Harness **completely** before running (closing the window is not enough; exit from
@@ -2609,6 +2657,8 @@ function helpText() {
 /* -------------------------------------------------------------------- main */
 
 function parseArgs(argv) {
+  // 可以给多次的参数（收集成数组，而不是后来者覆盖前面）
+  const MULTI = new Set(['skipWorkspace']);
   const out = { _: [] };
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
@@ -2620,7 +2670,12 @@ function parseArgs(argv) {
     const next = argv[i + 1];
     if (next === undefined || next.startsWith('--')) out[key] = true;
     else {
-      out[key] = next;
+      if (MULTI.has(key)) {
+        const prev = out[key];
+        out[key] = prev === undefined ? [next] : [].concat(prev, next);
+      } else {
+        out[key] = next;
+      }
       i++;
     }
   }
@@ -2630,6 +2685,44 @@ function parseArgs(argv) {
 const argv = parseArgs(process.argv.slice(2));
 let cmd = argv._[0];
 const selfDir = path.dirname(fileURLToPath(import.meta.url));
+
+/**
+ * 放在工具旁边的 dsh-migrate.config.json（或 ~/.dsh/.dsh-migrate.config.json）。
+ * 键名与命令行参数同名（驼峰）：{ "skipWorkspace": ["D:\\大目录"], "withPluginData": [".openviking"] }。
+ * 命令行显式给的参数优先；配置里写中文路径不受 .cmd 代码页限制。
+ */
+function applyLocalConfig() {
+  const files = [path.join(selfDir, 'dsh-migrate.config.json')];
+  try {
+    files.push(path.join(defaultHome(), '.dsh-migrate.config.json'));
+  } catch {
+    // home 解析失败就算了，旁边的配置仍然有效
+  }
+  for (const f of files) {
+    if (!exists(f)) continue;
+    let cfg;
+    try {
+      cfg = JSON.parse(fs.readFileSync(f, 'utf8').replace(/^\uFEFF/, ''));
+    } catch (e) {
+      warn(`配置文件读不了，已忽略：${f}（${e.message}）`);
+      continue;
+    }
+    if (!cfg || typeof cfg !== 'object') continue;
+    for (const [k, v] of Object.entries(cfg)) {
+      if (k.startsWith('_') || k === 'lang') continue;
+      if (k === 'skipWorkspace' || k === 'skipWorkspaces') {
+        const add = [].concat(v);
+        argv.skipWorkspace = argv.skipWorkspace ? [].concat(argv.skipWorkspace, add) : add;
+        continue;
+      }
+      if (argv[k] === undefined) argv[k] = v;
+    }
+    return f;
+  }
+  return null;
+}
+
+const cfgFile = applyLocalConfig();
 
 /*
  * 无参数 = U 盘模式，自适配方向：
@@ -2645,10 +2738,13 @@ if (argv.version || argv.V) {
 if (!cmd && (argv.help || argv.h)) {
   cmd = 'help';
 } else if (!cmd) {
-  const ready = exists(path.join(selfDir, 'manifest.json')) && isDir(path.join(selfDir, 'home'));
+  const station = argv.with || argv.in || selfDir;
+  const ready = exists(path.join(station, 'manifest.json')) && isDir(path.join(station, 'home'));
   step(ready ? '检测到中转站，开始双向同步' : '首次运行，初始化中转站（把本机完整推一份上去）');
   cmd = 'sync';
-  argv.with = selfDir;
+  // 显式给了 --with 就尊重它：另一台机器上 U 盘盘符可能不一样，
+  // 也可能想把中转站放在共享盘而不是工具所在目录。
+  if (!argv.with && !argv.in) argv.with = selfDir;
   argv.auto = true;
 }
 

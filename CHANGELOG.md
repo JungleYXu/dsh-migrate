@@ -4,6 +4,24 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project follows
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.1.1] — 2026-11-01
+
+One flag, one file, one fix: keep an unrelated huge folder out of the sync, let a JSON file carry
+the settings that a plain-ASCII launcher cannot, and stop ignoring an explicit relay path.
+
+### Added
+
+- `--skip-workspace <path|name>` (repeatable) keeps a workspace out of the sync — useful when a
+  huge folder (game install, asset library) happens to be registered as a DSH workspace.
+- `dsh-migrate.config.json` next to the script (or at `~/.dsh/.dsh-migrate.config.json`) can carry
+  the same options as flags. Command-line values still win; `skipWorkspace` is merged. This is how
+  a non-ASCII path gets in, since the `.cmd` launcher has to stay plain ASCII.
+
+### Fixed
+
+- An explicit `--with <relay-dir>` is now honoured without also typing the `sync` command; before,
+  auto mode silently replaced it with the tool's own folder.
+
 ## [1.1.0] — 2026-10-31
 
 Deletions now travel between machines, and every message speaks your language.

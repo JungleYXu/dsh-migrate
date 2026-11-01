@@ -187,7 +187,7 @@ try {
   console.log(`temp dir: ${root}`);
 
   console.log('\n[1] --version / --help');
-  check(run('--version').stdout.includes('1.1.0'), 'reports a version');
+  check(run('--version').stdout.includes('1.1.1'), 'reports a version');
   check(run('--help').status === 0, '--help exits 0');
 
   console.log('\n[2] pack');
@@ -357,6 +357,16 @@ try {
   r = run('sync', '--with', relay, '--home', B.home, '--workspace-root', path.dirname(B.ws), '--no-install', '--force', '--no-backup');
   check(r.status === 0, '--no-backup exits 0', r.stderr);
   check(runs().length === beforeNoBackup, '--no-backup leaves no new backup run', `runs=${runs().length}`);
+
+  // [13] --skip-workspace keeps a huge, unrelated workspace out of the sync
+  fs.writeFileSync(path.join(B.ws, 'keep-in-sync.txt'), 'yes\n');
+  const skippedFile = path.join(A.ws, 'skip-me.txt');
+  fs.writeFileSync(skippedFile, 'from A\n');
+  r = run('sync', '--with', relay, '--home', A.home, '--workspace-root', path.dirname(A.ws),
+    '--skip-workspace', path.basename(A.ws), '--no-install', '--force', '--no-backup');
+  check(r.status === 0, '--skip-workspace exits 0', r.stderr);
+  check(/跳过工作区|Skipped workspace/.test(r.stdout), 'sync says which workspace it skipped', r.stdout.match(/.*(跳过|Skipped).*/)?.[0]);
+  check(!fs.existsSync(path.join(relay, 'workspaces', 'ws-0', 'skip-me.txt')), 'skipped workspace files do not reach the relay');
 } finally {
   fs.rmSync(root, { recursive: true, force: true });
 }

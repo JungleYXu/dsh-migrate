@@ -69,8 +69,28 @@ node dsh-migrate.mjs --version | --help
 | `--no-install` | 跳过 `dsh plugin install`（只想看改动、或准备手工装）。 |
 | `--no-delete` | 不传播删除：只做并集合并，本机删掉的文件不会让对面也删。 |
 | `--no-backup` | 本次同步不做写前备份（默认会做，见下一节）。 |
+| `--skip-workspace <路径\|目录名>` | 不参与同步的工作区。可重复给多次或用逗号分隔；用来排除游戏目录、素材库这类大而无用的「工作区」。 |
 | `--dry-run` | 只打印会做什么，不写任何东西。**建议第一次先跑这个。** |
 | `--force` | 应用还在运行时也照跑；也用于覆盖已有的中转站。 |
+
+## 工具旁边的配置文件
+
+命令行能给的东西，也可以写在 `dsh-migrate.mjs` 旁边的 `dsh-migrate.config.json`（或
+`~/.dsh/.dsh-migrate.config.json`）：
+
+```json
+{
+  "skipWorkspace": ["D:\\游戏\\极品飞车"],
+  "withPluginData": ".openviking,.hindsight",
+  "noDelete": false
+}
+```
+
+键名是参数名的驼峰写法（`skipWorkspace`、`withPluginData`、`workspaceRoot`、`noInstall`、
+`noDelete`、`noBackup`……）。命令行显式给的参数优先；`skipWorkspace` 两边会合并。
+`--lang` 故意不放进来：它决定这次运行怎么说话，属于命令行（或用 `DSH_MIGRATE_LANG`）。
+这个文件主要是为中文路径准备的——`.cmd` 启动器必须是纯 ASCII，中文路径塞不进去，
+但可以放进这个 JSON。
 
 ## 同步范围
 
