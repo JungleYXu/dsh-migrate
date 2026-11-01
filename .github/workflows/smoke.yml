@@ -24,6 +24,11 @@ jobs:
         run: |
           node --version
           if (Test-Path smoke.log) {
+            $fails = (Select-String -Path smoke.log -Pattern 'FAIL') | ForEach-Object { $_.Line }
+            if ($fails) {
+              $joined = ($fails -join ' | ').Replace('%', '%25').Replace("`r", ' ')
+              "::error::SMOKE FAILS: $joined"
+            }
             $tail = (Get-Content smoke.log -Tail 45) -join ' | '
             $tail = $tail.Replace('%', '%25').Replace("`r", '').Replace("`n", ' ')
             "::error::SMOKE TAIL: $tail"
