@@ -4,6 +4,18 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project follows
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.1.2] — 2026-11-01
+
+One crash, one cause: newer Node builds hand back more bytes when decompressing the first log frame,
+and the header parser only expected one line.
+
+### Fixed
+
+- Syncing a session log whose first Zstandard frame decodes together with the next one no longer
+  crashes with `SyntaxError: Unexpected non-whitespace character after JSON`. The header is now
+  taken as the first line and any extra decoded bytes are re-framed, so it works on both decoder
+  behaviours (found by CI on Node 24.22; invisible on 24.21).
+
 ## [1.1.1] — 2026-11-01
 
 One flag, one file, one fix: keep an unrelated huge folder out of the sync, let a JSON file carry

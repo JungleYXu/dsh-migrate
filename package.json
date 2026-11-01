@@ -1,6 +1,6 @@
 {
   "name": "dsh-migrate",
-  "version": "1.1.1",
+  "version": "1.1.2",
   "description": "Move DeepSeek Harness between two computers: conversations, plugins, plugin settings and workspace files, merged instead of overwritten.",
   "type": "module",
   "bin": {

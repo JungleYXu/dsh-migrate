@@ -187,7 +187,7 @@ try {
   console.log(`temp dir: ${root}`);
 
   console.log('\n[1] --version / --help');
-  check(run('--version').stdout.includes('1.1.1'), 'reports a version');
+  check(run('--version').stdout.includes('1.1.2'), 'reports a version');
   check(run('--help').status === 0, '--help exits 0');
 
   console.log('\n[2] pack');
@@ -367,6 +367,27 @@ try {
   check(r.status === 0, '--skip-workspace exits 0', r.stderr);
   check(/跳过工作区|Skipped workspace/.test(r.stdout), 'sync says which workspace it skipped', r.stdout.match(/.*(跳过|Skipped).*/)?.[0]);
   check(!fs.existsSync(path.join(relay, 'workspaces', 'ws-0', 'skip-me.txt')), 'skipped workspace files do not reach the relay');
+  // [14] a log whose first zstd frame carries the header AND the first event together.
+  // Newer zstd decoders hand back both frames at once, and a naive
+  // "parse the first frame as JSON" then dies. Sync must normalise it instead.
+  {
+    const id = 'session-merged-frame';
+    const dir = path.join(A.home, 'sessions', projectKey(A.ws), id);
+    fs.mkdirSync(dir, { recursive: true });
+    const header = {
+      type: 'session', version: 4, id, createdAt: 1760000000000, cwd: A.ws,
+      isSeeded: false, delegationDepth: 0, agentPreset: 'standard',
+    };
+    const both = JSON.stringify(header) + '\n'
+      + JSON.stringify({ type: 'turn/end', seq: 1, time: 1760000000000, note: 'merged frame' }) + '\n';
+    fs.writeFileSync(path.join(dir, 'session.v4.jsonl.zstd'), zlib.zstdCompressSync(Buffer.from(both, 'utf8'), CHECKSUM));
+    r = syncA();
+    check(r.status === 0, 'a header+event single frame does not crash sync', r.stderr);
+    r = syncB();
+    check(r.status === 0, 'the other machine pulls that log without crashing', r.stderr);
+    const pulled = readHeader(B.home, id);
+    check(pulled && pulled.cwd === B.ws, 'pulled merged-frame log keeps a readable header with rewritten cwd', pulled && pulled.cwd);
+  }
 } finally {
   fs.rmSync(root, { recursive: true, force: true });
 }

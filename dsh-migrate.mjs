@@ -24,7 +24,7 @@ import zlib from 'node:zlib';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 
-const VERSION = '1.1.1';
+const VERSION = '1.1.2';
 const FORMAT = 'dsh-migrate/1';
 const ZSTD_MAGIC = 0xfd2fb528;
 const CHECKSUM = { params: { [zlib.constants.ZSTD_c_checksumFlag]: 1 } };
@@ -1101,11 +1101,18 @@ function splitLog(buf) {
   if (isZstd) {
     const n = firstFrameLength(buf);
     if (n < 0) throw new Error('无法定位首个 zstd 帧');
-    return {
-      isZstd,
-      headText: zlib.zstdDecompressSync(buf.subarray(0, n)).toString('utf8'),
-      tail: buf.subarray(n),
-    };
+    const raw = zlib.zstdDecompressSync(buf.subarray(0, n)).toString('utf8');
+    const nl = raw.indexOf('\n');
+    // 规范日志的首帧恰好只有一行 header。但 zstd 解码器版本之间行为不同：
+    // Node 24.22 会把「首帧 + 紧邻的下一帧」一起解出来，24.21 只解首帧。
+    // 那样 JSON.parse(首帧) 会因为后面还有一行而炸掉，所以这里统一按
+    // 「第一行是 header，多出来的部分重新压成独立帧」处理，保证下游永远看到单行头。
+    if (nl < 0) return { isZstd, headText: raw, tail: buf.subarray(n) };
+    const headText = raw.slice(0, nl + 1);
+    const rest = raw.slice(nl + 1);
+    if (!rest) return { isZstd, headText, tail: buf.subarray(n) };
+    const restFrame = zlib.zstdCompressSync(Buffer.from(rest, 'utf8'), CHECKSUM);
+    return { isZstd, headText, tail: Buffer.concat([restFrame, buf.subarray(n)]) };
   }
   const nl = buf.indexOf(0x0a);
   if (nl < 0) throw new Error('日志缺少首行');
